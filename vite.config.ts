@@ -5,7 +5,7 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
-    base: process.env.NODE_ENV === 'production' ? '/super/' : '/',
+    base: process.env.NODE_ENV === 'production' ? '/SuperAhorroIA/' : '/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
