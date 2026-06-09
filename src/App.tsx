@@ -552,7 +552,7 @@ export default function App() {
     }
 
     // Fetch and auto-merge presets from developer standard JSON file
-    fetch("/supermarkets.json")
+    fetch(`${import.meta.env.BASE_URL}supermarkets.json`)
       .then((res) => {
         if (!res.ok) throw new Error("No supermarkets.json presets found");
         return res.json();
