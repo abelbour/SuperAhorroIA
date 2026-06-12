@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Product, Receipt } from "./types";
+import { Product, Receipt, ApiProductResult, StoreAnalysisResult } from "./types";
 import { getUnitNormalization } from "./utils";
 import { db } from "./db";
 
@@ -603,4 +603,329 @@ export async function suggestShoppingListWithGemini(
   }
 }
 
+export async function parseApiResults(
+  rawResponses: { sourceName: string; rawData: any }[],
+  query: string,
+  apiKey: string
+): Promise<ApiProductResult[]> {
+  if (!apiKey) {
+    throw new Error("Missing Gemini API Key. Please configure your key in settings.");
+  }
+
+  if (rawResponses.length === 0) {
+    return [];
+  }
+
+  const responseSchema = {
+    type: "ARRAY",
+    description: "Extracted product listings from multiple supermarket/marketplace API responses.",
+    items: {
+      type: "OBJECT",
+      properties: {
+        shop: { type: "STRING", description: "The store or marketplace name (e.g. Mercado Libre, Carrefour)." },
+        brand: { type: "STRING", description: "The brand of the product (e.g. Arroz Gallo, Molinos Ala). Use empty string if unknown." },
+        productName: { type: "STRING", description: "Clean product name without size/presentation (e.g. Arroz Largo Fino)." },
+        presentation: { type: "STRING", description: "Human-readable size description (e.g. '1 kg', '500 ml', '6-pack')." },
+        amount: { type: "NUMBER", description: "Numeric amount value (e.g. 1 from '1 kg', 500 from '500 ml')." },
+        unit: { type: "STRING", description: "Unit label (e.g. g, kg, ml, L, units)." },
+        price: { type: "NUMBER", description: "The price of the product in the local currency." },
+        unitPrice: { type: "NUMBER", description: "Price normalized per base unit (e.g. per kg, per L, per unit). Calculate this yourself." },
+        baseUnit: { type: "STRING", description: "Base unit for normalization (kg, L, unit)." },
+        discountsAndDeals: { type: "STRING", description: "Any discounts, promotions or deals (e.g. '15% OFF', '2x1', 'Envío gratis'). Use empty string if none." },
+        sourceUrl: { type: "STRING", description: "Direct URL to the product page if available in the API response." },
+        category: { type: "STRING", description: "Category: Produce, Meat, Dairy, Bakery, Pantry, Beverages, Household, or Other." }
+      },
+      required: ["shop", "brand", "productName", "presentation", "amount", "unit", "price", "unitPrice", "baseUnit"]
+    }
+  };
+
+  const selectedModel = db.getSelectedModel();
+  const modelName = selectedModel.startsWith("models/") ? selectedModel.slice(7) : selectedModel;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+  const responsesJson = JSON.stringify(rawResponses.map(r => ({
+    source: r.sourceName,
+    data: r.rawData
+  })), null, 2);
+
+  const promptText = `
+    You are an expert price comparison data extractor.
+    Below are raw API responses from different supermarkets/marketplaces for the product query "${query}".
+    Auto-detect the structure of each response and extract ALL product listings.
+    Normalize prices to a standard format.
+    Identify any discounts, promotions, or special deals.
+    Calculate the unit price (price per base unit like kg, L, or unit) for each product.
+    Return the data as a JSON array of standardized product objects.
+
+    Raw API Responses:
+    ${responsesJson}
+  `;
+
+  const requestBody = {
+    contents: [{ parts: [{ text: promptText }] }],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: responseSchema,
+      temperature: 0.1,
+    },
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      console.error("Gemini parseApiResults error:", text);
+      return [];
+    }
+
+    const responseData = await response.json();
+    const textContent = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!textContent) {
+      console.warn("parseApiResults: no text content returned");
+      return [];
+    }
+
+    return JSON.parse(textContent.trim()) as ApiProductResult[];
+  } catch (err) {
+    console.error("parseApiResults failed:", err);
+    return [];
+  }
+}
+
+export async function parseScrapedResults(
+  htmlInputs: { sourceName: string; cleanedHtml: string; searchUrl: string }[],
+  query: string,
+  apiKey: string
+): Promise<ApiProductResult[]> {
+  if (!apiKey) {
+    throw new Error("Missing Gemini API Key. Please configure your key in settings.");
+  }
+
+  if (htmlInputs.length === 0) return [];
+
+  const responseSchema = {
+    type: "ARRAY",
+    description: "Extracted product listings from scraped supermarket HTML search results.",
+    items: {
+      type: "OBJECT",
+      properties: {
+        shop: { type: "STRING", description: "The store or marketplace name (e.g. Carrefour, Coto)." },
+        brand: { type: "STRING", description: "The brand of the product (e.g. Arroz Gallo, Molinos Ala). Use empty string if unknown." },
+        productName: { type: "STRING", description: "Clean product name without size/presentation (e.g. Arroz Largo Fino)." },
+        presentation: { type: "STRING", description: "Human-readable size description (e.g. '1 kg', '500 ml', '6-pack')." },
+        amount: { type: "NUMBER", description: "Numeric amount value (e.g. 1 from '1 kg', 500 from '500 ml')." },
+        unit: { type: "STRING", description: "Unit label (e.g. g, kg, ml, L, units)." },
+        price: { type: "NUMBER", description: "The price of the product in ARS ($)." },
+        unitPrice: { type: "NUMBER", description: "Price normalized per base unit (e.g. per kg, per L, per unit). Calculate this yourself." },
+        baseUnit: { type: "STRING", description: "Base unit for normalization (kg, L, unit)." },
+        discountsAndDeals: { type: "STRING", description: "Any discounts, promotions or deals (e.g. '15% OFF', '2x1', 'Envío gratis'). Use empty string if none." },
+        sourceUrl: { type: "STRING", description: "The search URL where this product was found." },
+        category: { type: "STRING", description: "Category: Produce, Meat, Dairy, Bakery, Pantry, Beverages, Household, or Other." }
+      },
+      required: ["shop", "brand", "productName", "presentation", "amount", "unit", "price", "unitPrice", "baseUnit"]
+    }
+  };
+
+  const selectedModel = db.getSelectedModel();
+  const modelName = selectedModel.startsWith("models/") ? selectedModel.slice(7) : selectedModel;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+  const inputsJson = JSON.stringify(htmlInputs.map(h => ({
+    source: h.sourceName,
+    html: h.cleanedHtml,
+    searchUrl: h.searchUrl,
+  })), null, 2);
+
+  const promptText = `
+    You are an expert price comparison data extractor for Argentine supermarkets.
+    Below are cleaned HTML search results from supermarket websites for the product "${query}".
+    The HTML has been stripped of scripts, styles, and navigation.
+    Extract ALL product listings you can find. Prices are in Argentine Pesos (ARS, $).
+    Normalize prices, detect amounts/units, and calculate unit prices.
+    Return the data as a JSON array of standardized product objects.
+    If no products are found, return an empty array.
+
+    Scraped Data:
+    ${inputsJson}
+  `;
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: promptText }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: responseSchema,
+          temperature: 0.1,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      console.error("Gemini parseScrapedResults error:", text);
+      return [];
+    }
+
+    const responseData = await response.json();
+    const textContent = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!textContent) {
+      console.warn("parseScrapedResults: no text content returned");
+      return [];
+    }
+
+    return JSON.parse(textContent.trim()) as ApiProductResult[];
+  } catch (err) {
+    console.error("parseScrapedResults failed:", err);
+    return [];
+  }
+}
+
+export async function analyzeStoreForApi(
+  storeName: string,
+  storeUrl: string,
+  apiKey: string
+): Promise<StoreAnalysisResult> {
+  if (!apiKey) {
+    throw new Error("Missing Gemini API Key. Please configure your key in settings.");
+  }
+
+  const responseSchema = {
+    type: "OBJECT",
+    properties: {
+      storeName: { type: "STRING", description: "The supermarket or store name provided by the user." },
+      websiteUrl: { type: "STRING", description: "The website URL of the store." },
+      methodType: {
+        type: "STRING",
+        description: "The recommended method: 'api' if a public REST API is available, 'scrape' if search URL scraping is needed, 'unsupported' if neither is feasible."
+      },
+      confidence: {
+        type: "STRING",
+        description: "How confident you are in this assessment: 'high', 'medium', or 'low'."
+      },
+      apiConfig: {
+        type: "OBJECT",
+        description: "Configuration for API-based price fetching. Only include if methodType is 'api'.",
+        properties: {
+          name: { type: "STRING", description: "Suggested name for this API data source." },
+          description: { type: "STRING", description: "Short description of what this API provides." },
+          method: { type: "STRING", description: "HTTP method: GET or POST." },
+          url: { type: "STRING", description: "The API endpoint URL with {producto} placeholder for the search query." },
+          headers: {
+            type: "STRING",
+            description: "Optional HTTP headers as a JSON object string. Example: '{\"Authorization\":\"Bearer token\"}'"
+          },
+          queryParams: {
+            type: "STRING",
+            description: "Optional query parameters as a JSON object string. Example: '{\"limit\":\"10\",\"sort\":\"price_asc\"}'"
+          },
+          responseJsonPath: { type: "STRING", description: "JSON path to the array of product results (e.g. 'results', 'data.items', 'products')." },
+          corsProxyUrl: { type: "STRING", description: "If the API doesn't support CORS, suggest a CORS proxy URL pattern with {url} placeholder." },
+          defaultCategory: { type: "STRING", description: "Default product category: Produce, Meat, Dairy, Bakery, Pantry, Beverages, Household, or Other." },
+          websiteUrl: { type: "STRING", description: "The store's main website URL." }
+        },
+        required: ["name", "description", "method", "url"]
+      },
+      scrapeConfig: {
+        type: "OBJECT",
+        description: "Configuration for URL-based search scraping. Only include if methodType is 'scrape'.",
+        properties: {
+          searchUrlTemplate: { type: "STRING", description: "The search URL with {producto} placeholder (e.g. 'https://www.store.com.ar/buscar?q={producto}')." },
+          cssSelectors: { type: "STRING", description: "CSS selectors for extracting product info from search results HTML, if known. Format: 'productContainer: .product-card, name: .title a, price: .price, brand: .brand, presentation: .size'." },
+          notes: { type: "STRING", description: "Any important notes about scraping this site (e.g. JavaScript rendering required, rate limits, special parameters)." }
+        },
+        required: ["searchUrlTemplate"]
+      },
+      analysis: { type: "STRING", description: "Professional analysis in Spanish explaining the recommended approach for this store." },
+      tips: { type: "STRING", description: "Practical tips in Spanish for getting the best results from this store's data source." }
+    },
+    required: ["storeName", "websiteUrl", "methodType", "confidence", "analysis", "tips"]
+  };
+
+  const selectedModel = db.getSelectedModel();
+  const modelName = selectedModel.startsWith("models/") ? selectedModel.slice(7) : selectedModel;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+  const promptText = `
+    You are an expert at analyzing supermarket and e-commerce websites to determine how to programmatically get product prices and availability data.
+
+    The user wants to set up automated price comparison for:
+    - Store Name: "${storeName}"
+    - Website URL: "${storeUrl}"
+
+    Analyze this store using your knowledge of e-commerce platforms, public APIs, and web technologies.
+
+    Consider:
+    1. Does this store have a known public REST API? (e.g. Mercado Libre API, Walmart API, etc.)
+    2. Does it use a common e-commerce platform with predictable URL patterns? (e.g. VTEX uses /catalogsearch/result/?q=, VTEX also has /api/catalog_system/pub/products/search/)
+    3. Can product prices be obtained via a well-structured search URL?
+    4. What is the best approach for a client-side application to get prices from this store?
+
+    For stores built on VTEX (like Carrefour Argentina, Jumbo, Disco):
+    - They have a public VTEX search API at /api/catalog_system/pub/products/search?q={producto}
+    - This returns JSON with prices, names, images
+    - methodType should be "api" and responseJsonPath should be left empty (the response itself is the array)
+
+    For stores with custom APIs (like Mercado Libre):
+    - Use their documented API endpoints
+    - Set appropriate query parameters and headers
+
+    For stores that only have HTML search pages:
+    - methodType should be "scrape"
+    - Generate the search URL template for their search box
+    - Provide CSS selectors if you know the HTML structure
+
+    If neither API nor scraping is feasible:
+    - methodType should be "unsupported"
+    - Explain why in the analysis field
+
+    Return the configuration in Spanish for the analysis and tips fields.
+  `;
+
+  const requestBody = {
+    contents: [{ parts: [{ text: promptText }] }],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: responseSchema,
+      temperature: 0.1,
+    },
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      console.error("analyzeStoreForApi error:", text);
+      let message = response.statusText;
+      try { const errJson = JSON.parse(text); message = errJson?.error?.message || message; } catch {}
+      throw new Error(`Error de Gemini: ${message}`);
+    }
+
+    const responseData = await response.json();
+    const textContent = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!textContent) {
+      throw new Error("No se recibió respuesta del análisis de la tienda.");
+    }
+
+    return JSON.parse(textContent.trim()) as StoreAnalysisResult;
+  } catch (err: any) {
+    console.error("analyzeStoreForApi failed:", err);
+    throw err;
+  }
+}
 

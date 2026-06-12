@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Product, ShoppingListItem, BroshureUpload, CustomSearchUrl, Receipt } from "./types";
+import { Product, ShoppingListItem, BroshureUpload, CatalogSource, Receipt } from "./types";
 
 const DB_NAME = "brochure_planner_db";
 const DB_VERSION = 1;
@@ -104,57 +104,86 @@ class WebLocalStorageDB {
     this.setStorage("bp_uploads", uploads);
   }
 
-  getCustomSearchUrls(): CustomSearchUrl[] {
-    const list = this.getStorage<CustomSearchUrl[]>("bp_custom_search_urls", []);
-    if (list.length === 0) {
-      // Pre-seed common Argentina Supermarkets
-      const defaultPresets: CustomSearchUrl[] = [
+  getCatalogSources(): CatalogSource[] {
+    const seeded = localStorage.getItem("bp_catalog_sources_seeded");
+    let list = this.getStorage<CatalogSource[]>("bp_catalog_sources", []);
+
+    if (!seeded && list.length === 0) {
+      const defaultPresets: CatalogSource[] = [
         {
-          id: "url-carrefour",
+          id: "cat-ml-argentina",
+          name: "Mercado Libre Argentina",
+          description: "API oficial de Mercado Libre para búsqueda de productos. No requiere API key para búsquedas públicas.",
+          websiteUrl: "https://www.mercadolibre.com.ar",
+          searchUrlTemplate: "https://www.mercadolibre.com.ar/search?q={producto}",
+          siteSearchEnabled: true,
+          searchMethod: "api",
+          apiMethod: "GET",
+          apiUrl: "https://api.mercadolibre.com/sites/MLA/search?q={producto}",
+          apiQueryParams: { limit: "10" },
+          apiResponseJsonPath: "results",
+          apiDefaultCategory: "Other",
+        },
+        {
+          id: "cat-carrefour",
           name: "Carrefour Argentina",
-          urlTemplate: "https://www.carrefour.com.ar/catalogsearch/result/?q={producto}",
           description: "La cadena líder en hipermercados. El buscador utiliza el parámetro standard q.",
-          aiInterpretation: "Buscador de Carrefour Argentina. La URL de consulta acepta `{producto}` que se expande del término de búsqueda. Los precios mostrados en la página corresponden a la sucursal seleccionada del cliente e incluye ofertas 'Mi Carrefour'."
+          websiteUrl: "https://www.carrefour.com.ar",
+          searchUrlTemplate: "https://www.carrefour.com.ar/search?q={producto}",
+          aiInterpretation: "Buscador de Carrefour Argentina (VTEX). La URL de consulta acepta `{producto}` que se expande del término de búsqueda. Los precios mostrados en la página corresponden a la sucursal seleccionada del cliente e incluye ofertas 'Mi Carrefour'.",
+          siteSearchEnabled: true,
+          searchMethod: "none",
         },
         {
-          id: "url-coto",
+          id: "cat-coto",
           name: "Coto Digital",
-          urlTemplate: "https://www.cotodigital3.com.ar/sitios/cdigi/browse?Ntt={producto}",
           description: "Coto de los argentinos. Requiere parámetro Ntt para realizar búsquedas textuales de mercadería.",
-          aiInterpretation: "Portal Coto Digital. El endpoint principal de búsqueda textual de productos requiere la clave Ntt. Es ideal para comparar carnes de oferta y marcas locales como Ciudad del Lago."
+          websiteUrl: "https://www.cotodigital3.com.ar",
+          searchUrlTemplate: "https://www.cotodigital3.com.ar/sitios/cdigi/browse?Ntt={producto}",
+          aiInterpretation: "Portal Coto Digital. El endpoint principal de búsqueda textual de productos requiere la clave Ntt. Es ideal para comparar carnes de oferta y marcas locales como Ciudad del Lago.",
+          siteSearchEnabled: true,
+          searchMethod: "none",
         },
         {
-          id: "url-jumbo",
+          id: "cat-jumbo",
           name: "Jumbo Argentina",
-          urlTemplate: "https://www.jumbo.com.ar/buscador?ft={producto}",
           description: "Supermercado premium del grupo Cencosud. Usa el parámetro ft.",
-          aiInterpretation: "Jumbo Argentina. El motor VTEX utiliza el parámetro de búsqueda `ft`. Retorna productos de alta gama y ofertas exclusivas de Tarjeta Cencosud."
+          websiteUrl: "https://www.jumbo.com.ar",
+          searchUrlTemplate: "https://www.jumbo.com.ar/buscador?ft={producto}",
+          aiInterpretation: "Jumbo Argentina. El motor VTEX utiliza el parámetro de búsqueda `ft`. Retorna productos de alta gama y ofertas exclusivas de Tarjeta Cencosud.",
+          siteSearchEnabled: true,
+          searchMethod: "none",
         },
         {
-          id: "url-dia",
+          id: "cat-dia",
           name: "Supermercados Día",
-          urlTemplate: "https://diaonline.supermercadosdia.com.ar/buscador?q={producto}",
           description: "Supermercado de cercanía con marca propia económica. Usa el parámetro q.",
-          aiInterpretation: "Día Online. El buscador web utiliza el parámetro `q` para encontrar mercaderías baratas y la reconocida marca Día (papas fritas, lácteos, etc.)."
+          websiteUrl: "https://diaonline.supermercadosdia.com.ar",
+          searchUrlTemplate: "https://diaonline.supermercadosdia.com.ar/buscador?q={producto}",
+          aiInterpretation: "Día Online. El buscador web utiliza el parámetro `q` para encontrar mercaderías baratas y la reconocida marca Día (papas fritas, lácteos, etc.).",
+          siteSearchEnabled: true,
+          searchMethod: "none",
         }
       ];
-      this.setStorage("bp_custom_search_urls", defaultPresets);
+      this.setStorage("bp_catalog_sources", defaultPresets);
+      localStorage.setItem("bp_catalog_sources_seeded", "true");
       return defaultPresets;
     }
+
     return list;
   }
 
-  saveCustomSearchUrl(urlItem: CustomSearchUrl) {
-    const urls = this.getCustomSearchUrls();
-    const idx = urls.findIndex((u) => u.id === urlItem.id);
-    if (idx >= 0) urls[idx] = urlItem;
-    else urls.push(urlItem);
-    this.setStorage("bp_custom_search_urls", urls);
+  saveCatalogSource(source: CatalogSource) {
+    const sources = this.getCatalogSources();
+    const idx = sources.findIndex((s) => s.id === source.id);
+    if (idx >= 0) sources[idx] = source;
+    else sources.push(source);
+    this.setStorage("bp_catalog_sources", sources);
   }
 
-  deleteCustomSearchUrl(id: string) {
-    const urls = this.getCustomSearchUrls().filter((u) => u.id !== id);
-    this.setStorage("bp_custom_search_urls", urls);
+  deleteCatalogSource(id: string) {
+    const sources = this.getCatalogSources().filter((s) => s.id !== id);
+    this.setStorage("bp_catalog_sources", sources);
   }
 
   getApiKey(): string {
@@ -205,6 +234,13 @@ class WebLocalStorageDB {
 
   clearReceipts() {
     this.setStorage("bp_receipts", []);
+  }
+
+  // Old data cleanup (migration from previous versions)
+  clearOldData() {
+    localStorage.removeItem("bp_custom_search_urls");
+    localStorage.removeItem("bp_api_data_sources");
+    localStorage.removeItem("bp_search_urls_seeded");
   }
 }
 

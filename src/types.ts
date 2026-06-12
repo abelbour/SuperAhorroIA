@@ -88,11 +88,72 @@ export interface OnlineStore {
   }>;
 }
 
-export interface CustomSearchUrl {
+export interface CatalogSource {
   id: string;
   name: string;
-  urlTemplate: string; // e.g. "https://www.carrefour.com.ar/catalogsearch/result/?q={producto}"
   description?: string;
-  aiInterpretation?: string; // AI generated step-by-step instructions or CSS selectors to parse/search the site
+  websiteUrl?: string;
+
+  // Site search (clickable link in scan tab)
+  searchUrlTemplate?: string;
+  aiInterpretation?: string;
+  siteSearchEnabled: boolean;
+
+  // Single search method per store
+  searchMethod: "api" | "scrape" | "none";
+
+  // API fields (when searchMethod === "api")
+  apiMethod?: "GET" | "POST";
+  apiUrl?: string;
+  apiHeaders?: Record<string, string>;
+  apiQueryParams?: Record<string, string>;
+  apiBodyTemplate?: string;
+  apiResponseJsonPath?: string;
+  apiCorsProxyUrl?: string;
+  apiDefaultCategory?: string;
+
+  // Scrape fields (when searchMethod === "scrape")
+  scrapeNotes?: string;
+}
+
+export interface ApiProductResult {
+  shop: string;
+  brand: string;
+  productName: string;
+  presentation: string; // e.g. "1 kg", "500 ml"
+  amount: number;
+  unit: string;
+  price: number;
+  unitPrice: number;
+  baseUnit: string;
+  discountsAndDeals: string;
+  sourceUrl?: string;
+  category?: string;
+}
+
+export interface StoreAnalysisResult {
+  storeName: string;
+  websiteUrl: string;
+  methodType: "api" | "scrape" | "unsupported";
+  confidence: "high" | "medium" | "low";
+  apiConfig?: {
+    name: string;
+    description: string;
+    method: "GET" | "POST";
+    url: string;
+    headers?: string; // JSON object string e.g. '{"Authorization":"Bearer token"}'
+    queryParams?: string; // JSON object string e.g. '{"limit":"10"}'
+    responseJsonPath?: string;
+    corsProxyUrl?: string;
+    defaultCategory?: string;
+    websiteUrl?: string;
+  };
+  scrapeConfig?: {
+    searchUrlTemplate: string;
+    cssSelectors?: string;
+    notes?: string;
+  };
+  analysis: string;
+  tips: string;
 }
 

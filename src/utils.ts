@@ -112,74 +112,13 @@ export function convertToCSV(products: Product[]): string {
  * Supermercados y precios reales de Argentina para comparaciones instantáneas.
  * Esto permite probar la aplicación de inmediato con alimentos típicos argentinos en ARS.
  */
-export const presetOnlineStores = [
-  {
-    id: "online-carrefour-arg",
-    name: "Carrefour Argentina",
-    isOnlineOnly: false,
-    websiteUrl: "https://www.carrefour.com.ar",
-    catalogItems: [
-      { name: "Leche Entera Larga Vida La Serenísima 1L", category: "Dairy", price: 1450.00, amount: 1, unit: "L" },
-      { name: "Yerba Mate Playadito 1kg", category: "Pantry", price: 4200.00, amount: 1, unit: "kg" },
-      { name: "Arroz Largo Fino Molinos Ala 1kg", category: "Pantry", price: 1950.00, amount: 1, unit: "kg" },
-      { name: "Fideos Letras Lucchetti 500g", category: "Pantry", price: 1180.00, amount: 500, unit: "g" },
-      { name: "Pan Lactal Blanco Grande Bimbo 550g", category: "Bakery", price: 3200.00, amount: 550, unit: "g" },
-      { name: "Aceite de Girasol Cocinero 1.5L", category: "Pantry", price: 2850.00, amount: 1.5, unit: "L" },
-      { name: "Queso Cremoso La Paulina 1kg", category: "Dairy", price: 6900.00, amount: 1, unit: "kg" },
-      { name: "Dulce de Leche Clásico Sancor 400g", category: "Dairy", price: 2100.00, amount: 400, unit: "g" },
-      { name: "Gaseosa Coca-Cola Original 2.25L", category: "Beverages", price: 2950.00, amount: 2.25, unit: "L" },
-      { name: "Asado de tira Novillo Especial 1kg", category: "Meat", price: 8900.00, amount: 1, unit: "kg" },
-      { name: "Pechuga de Pollo Fresca 1kg", category: "Meat", price: 4950.00, amount: 1, unit: "kg" },
-      { name: "Manzanas Rojas Deliciosas 1kg", category: "Produce", price: 1750.00, amount: 1, unit: "kg" },
-      { name: "Bananas Cavendish Ecuador 1kg", category: "Produce", price: 1990.00, amount: 1, unit: "kg" },
-      { name: "Jabón Líquido Ala Lavado Perfecto 3L", category: "Household", price: 9800.00, amount: 3, unit: "L" }
-    ]
-  },
-  {
-    id: "online-coto-digital-arg",
-    name: "Coto Digital",
-    isOnlineOnly: false,
-    websiteUrl: "https://www.cotodigital3.com.ar",
-    catalogItems: [
-      { name: "Leche Entera Larga Vida La Serenísima 1L", category: "Dairy", price: 1390.00, amount: 1, unit: "L" },
-      { name: "Yerba Mate Playadito 1kg", category: "Pantry", price: 4100.00, amount: 1, unit: "kg" },
-      { name: "Arroz Largo Fino Molinos Ala 1kg", category: "Pantry", price: 1890.00, amount: 1, unit: "kg" },
-      { name: "Fideos Letras Lucchetti 500g", category: "Pantry", price: 1150.00, amount: 500, unit: "g" },
-      { name: "Pan Lactal Blanco Grande Bimbo 550g", category: "Bakery", price: 2990.00, amount: 550, unit: "g" },
-      { name: "Aceite de Girasol Cocinero 1.5L", category: "Pantry", price: 2700.00, amount: 1.5, unit: "L" },
-      { name: "Queso Cremoso La Paulina 1kg", category: "Dairy", price: 6490.00, amount: 1, unit: "kg" },
-      { name: "Dulce de Leche Clásico Sancor 400g", category: "Dairy", price: 2250.00, amount: 400, unit: "g" },
-      { name: "Gaseosa Coca-Cola Original 2.25L", category: "Beverages", price: 2890.00, amount: 2.25, unit: "L" },
-      { name: "Asado de tira Novillo Especial 1kg", category: "Meat", price: 8490.00, amount: 1, unit: "kg" },
-      { name: "Pechuga de Pollo Fresca 1kg", category: "Meat", price: 4790.00, amount: 1, unit: "kg" },
-      { name: "Manzanas Rojas Deliciosas 1kg", category: "Produce", price: 1890.00, amount: 1, unit: "kg" },
-      { name: "Bananas Cavendish Ecuador 1kg", category: "Produce", price: 1850.00, amount: 1, unit: "kg" },
-      { name: "Jabón Líquido Ala Lavado Perfecto 3L", category: "Household", price: 9200.00, amount: 3, unit: "L" }
-    ]
-  },
-  {
-    id: "online-jumbo-arg",
-    name: "Jumbo Argentina",
-    isOnlineOnly: false,
-    websiteUrl: "https://www.jumbo.com.ar",
-    catalogItems: [
-      { name: "Leche Entera Larga Vida La Serenísima 1L", category: "Dairy", price: 1490.00, amount: 1, unit: "L" },
-      { name: "Yerba Mate Playadito 1kg", category: "Pantry", price: 4350.00, amount: 1, unit: "kg" },
-      { name: "Arroz Largo Fino Molinos Ala 1kg", category: "Pantry", price: 2100.00, amount: 1, unit: "kg" },
-      { name: "Fideos Letras Lucchetti 500g", category: "Pantry", price: 1290.00, amount: 500, unit: "g" },
-      { name: "Pan Lactal Blanco Grande Bimbo 550g", category: "Bakery", price: 3400.00, amount: 550, unit: "g" },
-      { name: "Aceite de Girasol Cocinero 1.5L", category: "Pantry", price: 2990.00, amount: 1.5, unit: "L" },
-      { name: "Queso Cremoso La Paulina 1kg", category: "Dairy", price: 7200.00, amount: 1, unit: "kg" },
-      { name: "Dulce de Leche Clásico Sancor 400g", category: "Dairy", price: 2390.00, amount: 400, unit: "g" },
-      { name: "Gaseosa Coca-Cola Original 2.25L", category: "Beverages", price: 3100.00, amount: 2.25, unit: "L" },
-      { name: "Asado de tira Novillo Especial 1kg", category: "Meat", price: 9200.00, amount: 1, unit: "kg" },
-      { name: "Pechuga de Pollo Fresca 1kg", category: "Meat", price: 5350.00, amount: 1, unit: "kg" },
-      { name: "Manzanas Rojas Deliciosas 1kg", category: "Produce", price: 1990.00, amount: 1, unit: "kg" },
-      { name: "Bananas Cavendish Ecuador 1kg", category: "Produce", price: 2150.00, amount: 1, unit: "kg" },
-      { name: "Jabón Líquido Ala Lavado Perfecto 3L", category: "Household", price: 9990.00, amount: 3, unit: "L" }
-    ]
-  }
-];
+export const presetOnlineStores: Array<{
+  id: string;
+  name: string;
+  isOnlineOnly: boolean;
+  websiteUrl: string;
+  catalogItems: Array<{ name: string; category: string; price: number; amount: number; unit: string }>;
+}> = [];
 
 /**
  * Searches for a match or similar products from online catalogs to compare with
@@ -221,4 +160,81 @@ export function findSimilarOnlineProducts(productName: string, category: string)
   });
 
   return matches.sort((a, b) => a.unitPrice - b.unitPrice);
+}
+
+/**
+ * Cleans raw HTML for Gemini consumption:
+ * - Parses with DOMParser
+ * - Strips scripts, styles, nav, header, footer, aside
+ * - Removes event handler attributes
+ * - Extracts visible text preserving structure
+ * - Filters to price-relevant lines
+ * - Truncates to ~30KB
+ */
+export function cleanHtmlForGemini(html: string): string {
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+
+    const removeSelectors = ["script", "style", "nav", "header", "footer", "aside", "noscript"];
+    removeSelectors.forEach(sel => {
+      doc.querySelectorAll(sel).forEach(el => el.remove());
+    });
+
+    doc.querySelectorAll("*").forEach(el => {
+      const attrs = el.attributes;
+      for (let i = attrs.length - 1; i >= 0; i--) {
+        if (attrs[i].name.startsWith("on")) {
+          el.removeAttribute(attrs[i].name);
+        }
+      }
+    });
+
+    const texts: string[] = [];
+    doc.querySelectorAll("body *").forEach(el => {
+      const tag = el.tagName.toLowerCase();
+      if (["script", "style", "noscript"].includes(tag)) return;
+      const text = (el as HTMLElement).innerText?.trim();
+      if (!text) return;
+      if (["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "th", "span", "div", "a", "label", "strong", "b"].includes(tag)) {
+        texts.push(text);
+      } else if (tag === "tr") {
+        texts.push("--- " + text.replace(/\n/g, " | "));
+      }
+    });
+
+    let cleaned = texts.join("\n");
+
+    const priceLines = cleaned.split("\n").filter(line => {
+      const l = line.trim();
+      if (!l) return false;
+      if (l.length < 3) return false;
+      const hasPrice = /\$\s*\d+[\d.,]*/.test(l);
+      const hasNumbers = /\d+/.test(l);
+      return hasPrice || hasNumbers || l.length > 20 || l.includes("$");
+    });
+
+    cleaned = priceLines.join("\n");
+    if (cleaned.length > 30000) {
+      cleaned = cleaned.slice(0, 30000) + "\n... [truncated]";
+    }
+    return cleaned;
+  } catch {
+    return html.slice(0, 30000);
+  }
+}
+
+export function translateCategory(cat: string): string {
+  const mapping: Record<string, string> = {
+    "produce": "Verdulería",
+    "meat": "Carnicería",
+    "dairy": "Lácteos",
+    "bakery": "Panadería",
+    "pantry": "Almacén",
+    "beverages": "Bebidas",
+    "household": "Limpieza y Hogar",
+    "other": "Otros"
+  };
+  const key = (cat || "").toLowerCase().trim();
+  return mapping[key] || cat;
 }

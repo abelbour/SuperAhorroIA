@@ -45,14 +45,16 @@ import {
   Receipt as ReceiptIcon
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { Product, ShoppingListItem, BroshureUpload, CustomSearchUrl, Receipt, ReceiptItem } from "./types";
+import { Product, ShoppingListItem, BroshureUpload, CatalogSource, Receipt, ReceiptItem, ApiProductResult, StoreAnalysisResult } from "./types";
 import { db } from "./db";
 import {
   getUnitNormalization,
   formatUnitPrice,
   convertToCSV,
   presetOnlineStores,
-  findSimilarOnlineProducts
+  findSimilarOnlineProducts,
+  translateCategory,
+  cleanHtmlForGemini
 } from "./utils";
 import { 
   parseBrochureWithGemini, 
@@ -64,8 +66,15 @@ import {
   parseReceiptWithGemini,
   ReceiptParseResult,
   suggestShoppingListWithGemini,
-  ShoppingListSuggestion
+  ShoppingListSuggestion,
+  parseApiResults,
+  parseScrapedResults,
+  analyzeStoreForApi
 } from "./gemini";
+import CatalogSourceForm from "./CatalogSourceForm";
+import DebouncedInput from "./DebouncedInput";
+import StoreAnalyzerWizard from "./StoreAnalyzerWizard";
+import GSheetsConfigForm from "./GSheetsConfigForm";
 
 export default function App() {
   // Shared States
@@ -122,13 +131,9 @@ export default function App() {
   const [scanCapturedImage, setScanCapturedImage] = useState<string | null>(null); // base64 string
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
-  // Custom Supermarket Catalog Search Engines
-  const [customSearchUrls, setCustomSearchUrls] = useState<CustomSearchUrl[]>([]);
-  const [newSearchUrlName, setNewSearchUrlName] = useState<string>("");
-  const [newSearchUrlTemplate, setNewSearchUrlTemplate] = useState<string>("");
-  const [newSearchUrlDesc, setNewSearchUrlDesc] = useState<string>("");
-  const [interpretingUrlId, setInterpretingUrlId] = useState<string | null>(null);
-  const [interpretingError, setInterpretingError] = useState<string | null>(null);
+  // Catalog sources (unified store configs)
+  const [catalogSources, setCatalogSources] = useState<CatalogSource[]>([]);
+  const [interpretingSourceId, setInterpretingSourceId] = useState<string | null>(null);
 
   // Search/Filters
   const [searchQuery, setSearchQuery] = useState<string>("");
@@ -162,6 +167,17 @@ export default function App() {
   // PWA Support
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [isInstallable, setIsInstallable] = useState<boolean>(false);
+
+  // Online search results
+  const [onlineSearchResults, setOnlineSearchResults] = useState<ApiProductResult[]>([]);
+  const [isSearchingOnline, setIsSearchingOnline] = useState<boolean>(false);
+  const [onlineSearchQuery, setOnlineSearchQuery] = useState<string>("");
+  const [editingCatalogSource, setEditingCatalogSource] = useState<CatalogSource | null>(null);
+  const [testingSourceId, setTestingSourceId] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{ id: string; status: number; body: string; bodyPreview: string; method: string } | null>(null);
+
+  // Store analysis wizard state
+  /* wizard state moved to StoreAnalyzerWizard component */
 
   const isFirstSyncRun = useRef<boolean>(true);
 
@@ -229,7 +245,7 @@ export default function App() {
       receipts: r,
       configs: {
         gemini_api_key: db.getApiKey(),
-        custom_search_urls: JSON.stringify(db.getCustomSearchUrls())
+        catalog_sources: JSON.stringify(db.getCatalogSources())
       }
     };
 
@@ -320,24 +336,15 @@ export default function App() {
         setProducts(mergedProducts);
         setReceipts(mergedReceipts);
 
-        // Parse configurations if loaded from sheets
+          // Parse configurations if loaded from sheets
         if (json.configs) {
           const cfg = json.configs;
           if (cfg.gemini_api_key) {
             db.saveApiKey(cfg.gemini_api_key);
             setApiKey(cfg.gemini_api_key);
           }
-          if (cfg.custom_search_urls) {
-            try {
-              const urls = JSON.parse(cfg.custom_search_urls);
-              if (Array.isArray(urls)) {
-                urls.forEach(u => db.saveCustomSearchUrl(u));
-                setCustomSearchUrls(db.getCustomSearchUrls());
-              }
-            } catch (err) {
-              console.error("Failed to parse custom_search_urls from gsheets", err);
-            }
-          }
+          // NOTE: catalog_sources are NOT imported from sheet during GET.
+          // Local state is source of truth; POST pushes it to sheet as a backup.
         }
 
         const postData = {
@@ -347,7 +354,7 @@ export default function App() {
           receipts: mergedReceipts,
           configs: {
             gemini_api_key: db.getApiKey(),
-            custom_search_urls: JSON.stringify(db.getCustomSearchUrls())
+            catalog_sources: JSON.stringify(db.getCatalogSources())
           }
         };
 
@@ -515,12 +522,13 @@ export default function App() {
 
   // Load all records on boot
   useEffect(() => {
+    db.clearOldData();
     setProducts(db.getProducts());
     setShoppingList(db.getShoppingList());
     setUploads(db.getUploads());
     setApiKey(db.getApiKey());
     setReceipts(db.getReceipts());
-    setCustomSearchUrls(db.getCustomSearchUrls());
+    setCatalogSources(db.getCatalogSources());
 
     const params = new URLSearchParams(window.location.search);
     const urlSsid = params.get("ssid");
@@ -551,33 +559,30 @@ export default function App() {
       handleSyncGSheets(url, ssid);
     }
 
-    // Fetch and auto-merge presets from developer standard JSON file
+    // Attempt to load extra presets from JSON (legacy, non-critical)
     fetch(`${import.meta.env.BASE_URL}supermarkets.json`)
       .then((res) => {
-        if (!res.ok) throw new Error("No supermarkets.json presets found");
+        if (!res.ok) throw new Error("No supermarkets.json found");
         return res.json();
       })
-      .then((jsonPresets: CustomSearchUrl[]) => {
+      .then((jsonPresets: CatalogSource[]) => {
         if (jsonPresets && Array.isArray(jsonPresets)) {
-          const currentList = db.getCustomSearchUrls();
+          const currentList = db.getCatalogSources();
           let updated = [...currentList];
           let hasChanges = false;
           jsonPresets.forEach((preset) => {
-            const itemExists = currentList.some(
-              (urlItem) => urlItem.id === preset.id || urlItem.urlTemplate === preset.urlTemplate
-            );
-            if (!itemExists) {
+            if (!currentList.some((s) => s.id === preset.id)) {
               updated.push(preset);
-              db.saveCustomSearchUrl(preset);
+              db.saveCatalogSource(preset);
               hasChanges = true;
             }
           });
           if (hasChanges) {
-            setCustomSearchUrls(updated);
+            setCatalogSources(updated);
           }
         }
       })
-      .catch((err) => console.log("Standard presets load info:", err));
+      .catch(() => {});
 
     const savedApiKey = db.getApiKey();
     if (savedApiKey) {
@@ -1047,6 +1052,185 @@ export default function App() {
   const triggerSuccess = (msg: string) => {
     setSuccessMessage(msg);
     setTimeout(() => setSuccessMessage(null), 4000);
+  };
+
+  // Execute online price search across all enabled catalog sources (API + Scrape)
+  const executeOnlineSearch = async (query: string) => {
+    if (!query.trim()) {
+      triggerError("Ingresa un producto para buscar.");
+      return;
+    }
+    const apiSources = catalogSources.filter(s => s.searchMethod === "api");
+    const scrapeSources = catalogSources.filter(s => s.searchMethod === "scrape" && s.searchUrlTemplate);
+    if (apiSources.length === 0 && scrapeSources.length === 0) {
+      triggerError("No hay fuentes con búsqueda programática habilitada. Configúralas en Ajustes.");
+      return;
+    }
+
+    setIsSearchingOnline(true);
+    setOnlineSearchQuery(query.trim());
+    setOnlineSearchResults([]);
+
+    const rawResults: { sourceName: string; rawData: any }[] = [];
+    const scrapedInputs: { sourceName: string; cleanedHtml: string; searchUrl: string }[] = [];
+    const sourceErrors: { sourceName: string; error: string }[] = [];
+    const encodedQuery = encodeURIComponent(query.trim());
+
+    async function tryFetch(url: string, opts?: RequestInit): Promise<Response | null> {
+      try { return await fetch(url, opts); } catch { return null; }
+    }
+
+    const gsheetsUrl = localStorage.getItem("bp_gsheets_url") || "";
+    const gsheetsProxyEnabled = localStorage.getItem("bp_gsheets_proxy_enabled") !== "false";
+    const publicProxyEnabled = localStorage.getItem("bp_public_proxy_enabled") !== "false";
+    const PROXIES = publicProxyEnabled
+      ? ["https://corsproxy.io/?url={url}", "https://api.allorigins.win/raw?url={url}"]
+      : [];
+
+    async function fetchWithFallback(
+      targetUrl: string, sourceName: string, fetchOptions?: RequestInit, isJson = true
+    ): Promise<Response | null> {
+      let response = await tryFetch(targetUrl, fetchOptions);
+      if ((!response || !response.ok) && targetUrl !== gsheetsUrl && gsheetsUrl && gsheetsProxyEnabled) {
+        try {
+          const gasBody = JSON.stringify({
+            action: "proxyFetch", targetUrl,
+            method: fetchOptions?.method || "GET",
+            headers: (fetchOptions?.headers as Record<string, string>) || {},
+            body: (fetchOptions as any)?.body || null,
+          });
+          console.log(`[${sourceName}] Trying GAS proxy for ${targetUrl.slice(0, 80)}...`);
+          const gasRes = await fetch(gsheetsUrl, { method: "POST", mode: "cors", headers: { "Content-Type": "text/plain" }, body: gasBody });
+          const gasJson = await gasRes.json();
+          if (gasJson.status === "success" && gasJson.body) {
+            console.log(`[${sourceName}] GAS proxy succeeded, ${gasJson.body.length} bytes`);
+            response = new Response(gasJson.body, { status: gasJson.responseCode || 200, headers: isJson ? { "Content-Type": "application/json" } : {} });
+          } else {
+            console.warn(`[${sourceName}] GAS proxy returned status="${gasJson.status}" body="${typeof gasJson.body}"`);
+          }
+        } catch (err: any) {
+          console.warn(`[${sourceName}] GAS proxy fetch error:`, err.message || err);
+        }
+      }
+      for (const tmpl of PROXIES) {
+        if (response && response.ok) break;
+        console.log(`[${sourceName}] Trying public proxy: ${tmpl}`);
+        response = await tryFetch(tmpl.replace(/{url}/g, encodeURIComponent(targetUrl)), fetchOptions);
+      }
+      return response;
+    }
+
+    // API sources
+    for (const s of apiSources) {
+      let targetUrl = "";
+      try {
+        targetUrl = (s.apiUrl || "").replace(/{producto}/g, encodedQuery);
+        const urlObj = new URL(targetUrl);
+        if (s.apiQueryParams) {
+          for (const key of Object.keys(s.apiQueryParams)) {
+            urlObj.searchParams.set(key, (s.apiQueryParams[key] || "").replace(/{producto}/g, encodedQuery));
+          }
+        }
+        const fetchOptions: RequestInit = { method: s.apiMethod || "GET" };
+        if (s.apiHeaders) fetchOptions.headers = s.apiHeaders;
+        if (s.apiMethod === "POST" && s.apiBodyTemplate) fetchOptions.body = s.apiBodyTemplate.replace(/{producto}/g, query.trim());
+
+        targetUrl = urlObj.toString();
+        console.log(`[${s.name}] Fetching API: ${targetUrl}`);
+        const response = await fetchWithFallback(targetUrl, s.name, fetchOptions, true);
+
+        if (!response || !response.ok) {
+          sourceErrors.push({ sourceName: s.name, error: response ? `HTTP ${response.status}` : "Sin conexión" });
+          continue;
+        }
+
+        let rawData = await response.json();
+        if (s.apiResponseJsonPath) {
+          for (const part of s.apiResponseJsonPath.split(".")) {
+            if (rawData && typeof rawData === "object" && part in rawData) rawData = rawData[part];
+            else { rawData = []; break; }
+          }
+        }
+        rawResults.push({ sourceName: s.name, rawData });
+        console.log(`[${s.name}] API success: ${rawData.length} items`);
+      } catch (err: any) {
+        console.warn(`[${s.name}] API fetch failed:`, err.message);
+        sourceErrors.push({ sourceName: s.name, error: err.message || "Error desconocido" });
+      }
+    }
+
+    // Scrape sources
+    for (const s of scrapeSources) {
+      try {
+        const scrapeUrl = (s.searchUrlTemplate || "").replace(/{producto}/g, encodedQuery);
+        if (!scrapeUrl) continue;
+
+        console.log(`[${s.name}] Scraping: ${scrapeUrl}`);
+        const response = await fetchWithFallback(scrapeUrl, s.name, undefined, false);
+        if (!response || !response.ok) {
+          sourceErrors.push({ sourceName: s.name, error: response ? `HTTP ${response.status}` : "Sin conexión" });
+          continue;
+        }
+
+        const html = await response.text();
+        const cleaned = cleanHtmlForGemini(html);
+        scrapedInputs.push({ sourceName: s.name, cleanedHtml: cleaned, searchUrl: scrapeUrl });
+        console.log(`[${s.name}] Scrape success: ${cleaned.length} chars cleaned`);
+      } catch (err: any) {
+        console.warn(`[${s.name}] Scrape fetch failed:`, err.message);
+        sourceErrors.push({ sourceName: s.name, error: err.message || "Error desconocido" });
+      }
+    }
+
+    if (rawResults.length === 0 && scrapedInputs.length === 0) {
+      triggerError("No se pudieron obtener resultados de ninguna fuente.");
+      setIsSearchingOnline(false);
+      return;
+    }
+
+    try {
+      if (!apiKey) {
+        triggerError("Se requiere API Key de Gemini.");
+        setIsSearchingOnline(false);
+        return;
+      }
+
+      let allParsed: ApiProductResult[] = [];
+
+      if (rawResults.length > 0) {
+        const parsed = await parseApiResults(rawResults, query, apiKey);
+        if (Array.isArray(parsed)) allParsed.push(...parsed);
+      }
+
+      if (scrapedInputs.length > 0) {
+        const parsed = await parseScrapedResults(scrapedInputs, query, apiKey);
+        if (Array.isArray(parsed)) allParsed.push(...parsed);
+      }
+
+      const queryLower = query.toLowerCase();
+      const queryWords = queryLower.split(/\s+/).filter(Boolean);
+      const scored = allParsed.map(item => {
+        const nameLower = (item.productName + " " + (item.brand || "")).toLowerCase();
+        const exactMatch = nameLower.includes(queryLower) ? 3 : 0;
+        const wordMatch = queryWords.filter(w => nameLower.includes(w)).length;
+        return { item, score: exactMatch + wordMatch };
+      });
+      scored.sort((a, b) => b.score - a.score);
+      const matched = scored.filter(s => s.score > 0).map(s => s.item);
+      const filtered = matched.length > 0 ? matched : allParsed;
+      setOnlineSearchResults(filtered);
+      if (filtered.length === 0) {
+        triggerError("Gemini no pudo extraer productos de las respuestas.");
+      } else {
+        const totalSources = rawResults.length + scrapedInputs.length;
+        triggerSuccess(`Se encontraron ${filtered.length} productos en ${totalSources} fuente(s).`);
+      }
+    } catch (err: any) {
+      console.error("executeOnlineSearch parse error:", err);
+      triggerError(`Error al procesar resultados: ${err.message}`);
+    } finally {
+      setIsSearchingOnline(false);
+    }
   };
 
   // Seed realistic grocery catalog brochures history to test Price History right away!
@@ -1881,59 +2065,289 @@ export default function App() {
   };
 
   // Custom Supermarket Search Engines Actions
-  const handleSaveSearchUrl = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newSearchUrlName.trim() || !newSearchUrlTemplate.trim()) {
-      triggerError("Por favor, ingrese un nombre y una plantilla de URL.");
+  const handleSaveCatalogSource = (source: CatalogSource) => {
+    if (!source.name.trim()) {
+      triggerError("El nombre es obligatorio.");
       return;
     }
-
-    const id = `url-${Date.now()}`;
-    const newEngine: CustomSearchUrl = {
-      id,
-      name: newSearchUrlName,
-      urlTemplate: newSearchUrlTemplate,
-      description: newSearchUrlDesc || "Buscador personalizado ingresado por el usuario."
-    };
-
-    db.saveCustomSearchUrl(newEngine);
-    setCustomSearchUrls(db.getCustomSearchUrls());
-    setNewSearchUrlName("");
-    setNewSearchUrlTemplate("");
-    setNewSearchUrlDesc("");
-    triggerSuccess(`Buscador "${newEngine.name}" guardado con éxito.`);
+    db.saveCatalogSource(source);
+    setCatalogSources(db.getCatalogSources());
+    setEditingCatalogSource(null);
+    triggerSuccess(`"${source.name}" guardado.`);
   };
 
-  const handleDeleteSearchUrl = (id: string, name: string) => {
-    db.deleteCustomSearchUrl(id);
-    setCustomSearchUrls(db.getCustomSearchUrls());
-    triggerSuccess(`Buscador "${name}" eliminado.`);
+  const handleDeleteCatalogSource = (id: string, name: string) => {
+    db.deleteCatalogSource(id);
+    setCatalogSources(db.getCatalogSources());
+    if (editingCatalogSource?.id === id) setEditingCatalogSource(null);
+    triggerSuccess(`"${name}" eliminado.`);
   };
 
-  const handleInterpretSearchUrl = async (urlItem: CustomSearchUrl) => {
+  const handleInterpretCatalogSource = async (source: CatalogSource) => {
     if (!apiKey) {
       triggerError("Falta la clave API de Gemini. Configúrela primero en la sección de Ajustes.");
       return;
     }
-    setInterpretingUrlId(urlItem.id);
-    setInterpretingError(null);
+    if (!source.searchUrlTemplate) {
+      triggerError("Este catálogo no tiene URL de búsqueda configurada.");
+      return;
+    }
+    setInterpretingSourceId(source.id);
     try {
-      const result = await interpretSearchUrlWithGemini(urlItem.name, urlItem.urlTemplate, apiKey);
-      const updated: CustomSearchUrl = {
-        ...urlItem,
-        urlTemplate: result.urlTemplate,
+      const result = await interpretSearchUrlWithGemini(source.name, source.searchUrlTemplate, apiKey);
+      const updated: CatalogSource = {
+        ...source,
+        searchUrlTemplate: result.urlTemplate,
         aiInterpretation: `💡 **Análisis de IA:** ${result.aiExplanation}\n\n🏷️ **Tips de Ahorro:** ${result.tipsForUser}`
       };
-      db.saveCustomSearchUrl(updated);
-      setCustomSearchUrls(db.getCustomSearchUrls());
-      triggerSuccess(`¡IA interpretó correctamente el buscador de "${urlItem.name}"!`);
+      db.saveCatalogSource(updated);
+      setCatalogSources(db.getCatalogSources());
+      setEditingCatalogSource(updated);
+      triggerSuccess(`¡IA interpretó correctamente el buscador de "${source.name}"!`);
     } catch (err: any) {
       console.error(err);
-      setInterpretingError(err.message || "Error al interpretar.");
       triggerError("No se pudo interpretar el buscador con IA.");
     } finally {
-      setInterpretingUrlId(null);
+      setInterpretingSourceId(null);
     }
+  };
+
+  const handleAddApiProductToCatalog = (item: ApiProductResult) => {
+    const norm = getUnitNormalization(item.amount, item.unit);
+    const newProduct: Product = {
+      id: `api-prod-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      name: `${item.brand ? item.brand + " " : ""}${item.productName}`,
+      category: item.category || "Other",
+      originalPrice: item.price,
+      salePrice: item.price,
+      amount: item.amount,
+      unit: item.unit,
+      supermarket: item.shop,
+      dateExtracted: new Date().toISOString(),
+      unitPrice: item.price * norm.multiplier,
+      baseUnit: norm.baseUnit,
+      description: item.discountsAndDeals || "",
+      sourceType: "online",
+    };
+    db.saveProduct(newProduct);
+    setProducts(db.getProducts());
+    triggerSuccess(`"${newProduct.name}" agregado al catálogo.`);
+  };
+
+  const handleAddAllApiProductsToCatalog = () => {
+    let count = 0;
+    onlineSearchResults.forEach(item => {
+      const norm = getUnitNormalization(item.amount, item.unit);
+      const newProduct: Product = {
+        id: `api-prod-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        name: `${item.brand ? item.brand + " " : ""}${item.productName}`,
+        category: item.category || "Other",
+        originalPrice: item.price,
+        salePrice: item.price,
+        amount: item.amount,
+        unit: item.unit,
+        supermarket: item.shop,
+        dateExtracted: new Date().toISOString(),
+        unitPrice: item.price * norm.multiplier,
+        baseUnit: norm.baseUnit,
+        description: item.discountsAndDeals || "",
+        sourceType: "online",
+      };
+      db.saveProduct(newProduct);
+      count++;
+    });
+    setProducts(db.getProducts());
+    setOnlineSearchResults([]);
+    triggerSuccess(`${count} productos agregados al catálogo.`);
+  };
+
+  // Store analysis wizard handlers
+  const handleAcceptWizardAnalysis = (analysis: StoreAnalysisResult) => {
+    const baseSource: CatalogSource = {
+      id: `cat-${Date.now()}`,
+      name: analysis.storeName,
+      websiteUrl: analysis.websiteUrl,
+      siteSearchEnabled: true,
+      searchMethod: "none",
+    };
+
+    if (analysis.methodType === "api" && analysis.apiConfig) {
+      const cfg = analysis.apiConfig;
+      let parsedHeaders: Record<string, string> | undefined;
+      let parsedQueryParams: Record<string, string> | undefined;
+      try { if (cfg.headers && typeof cfg.headers === "string") parsedHeaders = JSON.parse(cfg.headers); } catch {}
+      try { if (cfg.queryParams && typeof cfg.queryParams === "string") parsedQueryParams = JSON.parse(cfg.queryParams); } catch {}
+
+      const newSource: CatalogSource = {
+        ...baseSource,
+        description: cfg.description || `Configurado por IA para ${analysis.storeName}`,
+        searchUrlTemplate: cfg.websiteUrl ? `${cfg.websiteUrl.replace(/\/$/, "")}/search?q={producto}` : undefined,
+        searchMethod: "api",
+        apiMethod: cfg.method,
+        apiUrl: cfg.url,
+        apiHeaders: parsedHeaders,
+        apiQueryParams: parsedQueryParams,
+        apiResponseJsonPath: cfg.responseJsonPath || undefined,
+        apiCorsProxyUrl: cfg.corsProxyUrl || undefined,
+        apiDefaultCategory: cfg.defaultCategory || "Other",
+      };
+      db.saveCatalogSource(newSource);
+      setCatalogSources(db.getCatalogSources());
+      triggerSuccess(`"${newSource.name}" agregado con API.`);
+    } else if (analysis.methodType === "scrape" && analysis.scrapeConfig) {
+      const cfg = analysis.scrapeConfig;
+      const newSource: CatalogSource = {
+        ...baseSource,
+        description: `Configurado por IA para ${analysis.storeName}. ${cfg.notes || ""}`,
+        searchUrlTemplate: cfg.searchUrlTemplate,
+        aiInterpretation: `🔍 **Análisis de IA:** ${analysis.analysis}\n\n💡 **Tips:** ${analysis.tips}`,
+        searchMethod: "scrape",
+        scrapeNotes: cfg.notes || undefined,
+      };
+      db.saveCatalogSource(newSource);
+      setCatalogSources(db.getCatalogSources());
+      triggerSuccess(`"${newSource.name}" agregado con scraping web.`);
+    } else {
+      triggerError(`No se pudo configurar: ${analysis.analysis}`);
+      return;
+    }
+  };
+
+  const handleTestCatalogSource = async (source: CatalogSource) => {
+    setTestingSourceId(source.id);
+    setTestResult(null);
+    const testQuery = "arroz";
+
+    if (source.searchMethod === "api" && source.apiUrl) {
+      try {
+        let requestUrl = source.apiUrl.replace(/{producto}/g, encodeURIComponent(testQuery));
+        const urlObj = new URL(requestUrl);
+        if (source.apiQueryParams) {
+          for (const key of Object.keys(source.apiQueryParams)) {
+            urlObj.searchParams.set(key, source.apiQueryParams[key].replace(/{producto}/g, encodeURIComponent(testQuery)));
+          }
+        }
+        const fetchOptions: RequestInit = { method: source.apiMethod || "GET" };
+        if (source.apiHeaders) fetchOptions.headers = source.apiHeaders;
+        if (source.apiMethod === "POST" && source.apiBodyTemplate) fetchOptions.body = source.apiBodyTemplate.replace(/{producto}/g, testQuery);
+
+        const targetUrl = urlObj.toString();
+
+        let response: Response | null = null;
+
+        async function tryFetchNorm(url: string, opts: RequestInit): Promise<Response | null> {
+          try { return await fetch(url, opts); } catch { return null; }
+        }
+
+        console.log(`[Test ${source.name}] Direct fetch: ${targetUrl}`);
+        response = await tryFetchNorm(targetUrl, fetchOptions);
+        if (!response && source.apiCorsProxyUrl) {
+          const proxyUrl = source.apiCorsProxyUrl.replace(/{url}/g, encodeURIComponent(targetUrl));
+          console.log(`[Test ${source.name}] Trying source cors proxy: ${proxyUrl}`);
+          response = await tryFetchNorm(proxyUrl, fetchOptions);
+        }
+        if (!response) {
+          const gsheetsUrl = localStorage.getItem("bp_gsheets_url") || "";
+          if (gsheetsUrl && localStorage.getItem("bp_gsheets_proxy_enabled") !== "false") {
+            try {
+              console.log(`[Test ${source.name}] Trying GAS proxy...`);
+              const gasBody = JSON.stringify({ action: "proxyFetch", targetUrl, method: source.apiMethod, headers: source.apiHeaders || {} });
+              const gasRes = await fetch(gsheetsUrl, { method: "POST", mode: "cors", headers: { "Content-Type": "text/plain" }, body: gasBody });
+              const gasJson = await gasRes.json();
+              if (gasJson.status === "success" && gasJson.body) {
+                console.log(`[Test ${source.name}] GAS proxy succeeded`);
+                response = new Response(gasJson.body, { status: gasJson.responseCode || 200, headers: { "Content-Type": "application/json" } });
+              } else {
+                console.warn(`[Test ${source.name}] GAS proxy returned status="${gasJson.status}"`);
+              }
+            } catch (err: any) {
+              console.warn(`[Test ${source.name}] GAS proxy error:`, err.message || err);
+            }
+          }
+        }
+        if (!response && localStorage.getItem("bp_public_proxy_enabled") !== "false") {
+          const proxies = ["https://corsproxy.io/?url={url}", "https://api.allorigins.win/raw?url={url}"];
+          for (const tmpl of proxies) {
+            response = await tryFetchNorm(tmpl.replace(/{url}/g, encodeURIComponent(targetUrl)), fetchOptions);
+            if (response) break;
+          }
+        }
+
+        if (!response) {
+          setTestResult({ id: source.id, status: 0, body: "Sin respuesta", bodyPreview: "No se pudo conectar después de todos los intentos.", method: "api" });
+          return;
+        }
+
+        const bodyText = await response.text();
+        const preview = bodyText.length > 500 ? bodyText.slice(0, 500) + "\n... (truncado, " + bodyText.length + " chars total)" : bodyText;
+        setTestResult({ id: source.id, status: response.status, body: bodyText, bodyPreview: preview, method: "api" });
+      } catch (err: any) {
+        setTestResult({ id: source.id, status: 0, body: err.message, bodyPreview: `Error: ${err.message}`, method: "api" });
+      } finally {
+        setTestingSourceId(null);
+      }
+      return;
+    }
+
+    if (source.searchMethod === "scrape") {
+      const scrapeUrl = (source.searchUrlTemplate || "").replace(/{producto}/g, encodeURIComponent(testQuery));
+      if (!scrapeUrl) {
+        setTestResult({ id: source.id, status: 0, body: "Sin URL", bodyPreview: "No hay URL de búsqueda configurada.", method: "scrape" });
+        setTestingSourceId(null);
+        return;
+      }
+      try {
+        let response: Response | null = null;
+        async function tryFetch(url: string): Promise<Response | null> {
+          try { return await fetch(url); } catch { return null; }
+        }
+        console.log(`[Test ${source.name}] Direct fetch: ${scrapeUrl}`);
+        response = await tryFetch(scrapeUrl);
+        if (!response) {
+          const gsheetsUrl = localStorage.getItem("bp_gsheets_url") || "";
+          if (gsheetsUrl && localStorage.getItem("bp_gsheets_proxy_enabled") !== "false") {
+            try {
+              console.log(`[Test ${source.name}] Trying GAS proxy...`);
+              const gasBody = JSON.stringify({ action: "proxyFetch", targetUrl: scrapeUrl, method: "GET" });
+              const gasRes = await fetch(gsheetsUrl, { method: "POST", mode: "cors", headers: { "Content-Type": "text/plain" }, body: gasBody });
+              const gasJson = await gasRes.json();
+              if (gasJson.status === "success" && gasJson.body) {
+                console.log(`[Test ${source.name}] GAS proxy succeeded, ${gasJson.body.length} bytes`);
+                response = new Response(gasJson.body, { status: gasJson.responseCode || 200 });
+              } else {
+                console.warn(`[Test ${source.name}] GAS proxy returned status="${gasJson.status}"`);
+              }
+            } catch (err: any) {
+              console.warn(`[Test ${source.name}] GAS proxy error:`, err.message || err);
+            }
+          }
+        }
+        if (!response && localStorage.getItem("bp_public_proxy_enabled") !== "false") {
+          const proxies = ["https://corsproxy.io/?url={url}", "https://api.allorigins.win/raw?url={url}"];
+          for (const tmpl of proxies) {
+            console.log(`[Test ${source.name}] Trying public proxy: ${tmpl}`);
+            response = await tryFetch(tmpl.replace(/{url}/g, encodeURIComponent(scrapeUrl)));
+            if (response) break;
+          }
+        }
+        if (!response) {
+          setTestResult({ id: source.id, status: 0, body: "Sin respuesta", bodyPreview: "No se pudo conectar.", method: "scrape" });
+          return;
+        }
+        const bodyText = await response.text();
+        const cleaned = cleanHtmlForGemini(bodyText);
+        const preview = cleaned.length > 500 ? cleaned.slice(0, 500) + "\n... (truncado, " + cleaned.length + " chars)" : cleaned;
+        setTestResult({ id: source.id, status: response.status, body: cleaned, bodyPreview: preview, method: "scrape" });
+      } catch (err: any) {
+        setTestResult({ id: source.id, status: 0, body: err.message, bodyPreview: `Error: ${err.message}`, method: "scrape" });
+      } finally {
+        setTestingSourceId(null);
+      }
+      return;
+    }
+
+    setTestResult({ id: source.id, status: 0, body: "Sin método", bodyPreview: "Este catálogo no tiene API ni scraping configurado.", method: "none" });
+    setTestingSourceId(null);
   };
 
   // PWA trigger installer
@@ -2444,59 +2858,44 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Botón rápido para restaurar o cargar datos falsos para onboardear */}
-              {products.length === 0 && (
-                <div className="mt-4 p-5 bg-sky-50 rounded-2xl border border-sky-100 flex flex-col sm:flex-row items-center justify-between gap-4">
-                  <div className="space-y-1 text-center sm:text-left">
-                    <p className="font-bold text-slate-800 text-sm">¿Deseas probar la aplicación de inmediato?</p>
-                    <p className="text-xs text-slate-600">Carga un lote completo de productos falsos y de simulación para ver cómo operan los filtros y comparativas del planificador.</p>
-                  </div>
-                  <button
-                    onClick={loadDemoData}
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2 px-4 rounded-xl transition shadow cursor-pointer shrink-0"
-                  >
-                    Cargar Datos de Simulación
-                  </button>
-                </div>
-              )}
-            </motion.div>
-          )}
-
-          {/* TAB 1: CATALOG OF PRODUCTS */}
-          {activeTab === "catalog" && (
-            <motion.div
-              key="catalog-tab"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.15 }}
-            >
-              
-              {/* Warnings / Onboarding callout when empty */}
-              {products.length === 0 && (
-                <div className="bg-gradient-to-r from-sky-50 to-indigo-50 border border-sky-100 rounded-2xl p-6 md:p-8 text-center max-w-2xl mx-auto my-8">
-                  <Store className="w-12 h-12 text-sky-500 mx-auto mb-4" />
-                  <h3 className="text-lg font-bold text-slate-800">Your Product Comparison Database is Empty</h3>
-                  <p className="text-sm text-slate-600 mt-2 max-w-md mx-auto">
-                    To start saving, you can parse a supermarket PDF brochure using Gemini AI, or load high-quality mock data instantly to preview catalog tracking.
-                  </p>
-                  <div className="mt-6 flex flex-wrap justify-center gap-3">
-                    <button
-                      onClick={loadDemoData}
-                      className="bg-white hover:bg-slate-50 text-slate-800 font-semibold px-4 py-2.5 rounded-xl border border-slate-200 shadow-sm transition active:scale-95 text-sm"
-                    >
-                      Load Realistic Test Data
-                    </button>
-                    <button
-                      onClick={() => setActiveTab("upload")}
-                      className="bg-sky-600 hover:bg-sky-700 text-white font-semibold px-4 py-2.5 rounded-xl shadow-md transition active:scale-95 text-sm flex items-center gap-2"
-                    >
-                      <Upload className="w-4 h-4" />
-                      Upload Brochure PDF
-                    </button>
-                  </div>
-                </div>
-              )}
+             </motion.div>
+           )}
+ 
+           {/* TAB 1: CATALOG OF PRODUCTS */}
+           {activeTab === "catalog" && (
+             <motion.div
+               key="catalog-tab"
+               initial={{ opacity: 0, y: 10 }}
+               animate={{ opacity: 1, y: 0 }}
+               exit={{ opacity: 0, y: -10 }}
+               transition={{ duration: 0.15 }}
+             >
+               
+               {/* Warnings / Onboarding callout when empty */}
+               {products.length === 0 && (
+                 <div className="bg-gradient-to-r from-sky-50 to-indigo-50 border border-sky-100 rounded-2xl p-6 md:p-8 text-center max-w-2xl mx-auto my-8">
+                   <Store className="w-12 h-12 text-sky-500 mx-auto mb-4" />
+                   <h3 className="text-lg font-bold text-slate-800">Tu base de datos de comparación de productos está vacía</h3>
+                   <p className="text-sm text-slate-600 mt-2 max-w-md mx-auto">
+                     Para comenzar a ahorrar, puedes subir folletos de supermercados en formato PDF, escanear o cargar un ticket de compra con la cámara inteligente, o sincronizar tus datos desde Google Sheets.
+                   </p>
+                   <div className="mt-6 flex flex-wrap justify-center gap-3">
+                     <button
+                       onClick={() => setActiveTab("upload")}
+                       className="bg-sky-600 hover:bg-sky-700 text-white font-semibold px-4 py-2.5 rounded-xl shadow-md transition active:scale-95 text-sm flex items-center gap-2"
+                     >
+                       <Upload className="w-4 h-4" />
+                       Subir Folleto PDF
+                     </button>
+                     <button
+                       onClick={() => setActiveTab("scan")}
+                       className="bg-white hover:bg-slate-50 text-slate-800 font-semibold px-4 py-2.5 rounded-xl border border-slate-200 shadow-sm transition active:scale-95 text-sm flex items-center gap-2"
+                     >
+                       📸 Escanear Ticket / Etiqueta
+                     </button>
+                   </div>
+                 </div>
+               )}
 
               {products.length > 0 && (
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -2510,11 +2909,11 @@ export default function App() {
                       {/* Search */}
                       <div className="relative">
                         <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
-                        <input
+                        <DebouncedInput
                           type="text"
-                          placeholder="Search products, brands, categories..."
+                          placeholder="Buscar productos, marcas, categorías..."
                           value={searchQuery}
-                          onChange={(e) => setSearchQuery(e.target.value)}
+                          onChange={setSearchQuery}
                           className="w-full pl-9 pr-4 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:border-sky-500 focus:outline-none"
                         />
                       </div>
@@ -2522,32 +2921,32 @@ export default function App() {
                       {/* Dropdowns */}
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
                         <div>
-                          <label className="block text-slate-500 font-medium mb-1">Department Category</label>
+                          <label className="block text-slate-500 font-medium mb-1">Categoría de Rubro</label>
                           <select
                             value={categoryFilter}
                             onChange={(e) => setCategoryFilter(e.target.value)}
                             className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
                           >
-                            <option value="All">All Departments</option>
-                            <option value="Produce">Produce 🍏</option>
-                            <option value="Meat">Meat & Seafood 🥩</option>
-                            <option value="Dairy">Dairy & Eggs 🥛</option>
-                            <option value="Bakery">Bakery 🍞</option>
-                            <option value="Pantry">Pantry & Snacks 🍝</option>
-                            <option value="Beverages">Beverages 🥤</option>
-                            <option value="Household">Household Care 🧼</option>
-                            <option value="Other">Other Elements 📦</option>
+                            <option value="All">Todos los rubros</option>
+                            <option value="Produce">Verdulería y Frutas 🍏</option>
+                            <option value="Meat">Carnes y Pescados 🥩</option>
+                            <option value="Dairy">Lácteos y Huevos 🥛</option>
+                            <option value="Bakery">Panadería 🍞</option>
+                            <option value="Pantry">Almacén y Comestibles 🍝</option>
+                            <option value="Beverages">Bebidas 🥤</option>
+                            <option value="Household">Limpieza y Hogar 🧼</option>
+                            <option value="Other">Otros 📦</option>
                           </select>
                         </div>
 
                         <div>
-                          <label className="block text-slate-500 font-medium mb-1">Supermarket</label>
+                          <label className="block text-slate-500 font-medium mb-1">Supermercado</label>
                           <select
                             value={supermarketFilter}
                             onChange={(e) => setSupermarketFilter(e.target.value)}
                             className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
                           >
-                            <option value="All">All Supermarkets</option>
+                            <option value="All">Todos los supermercados</option>
                             {uniqueSupermarkets.map((m) => (
                               <option key={m} value={m}>{m}</option>
                             ))}
@@ -2555,20 +2954,102 @@ export default function App() {
                         </div>
 
                         <div>
-                          <label className="block text-slate-500 font-medium mb-1">Sort Catalog By</label>
+                          <label className="block text-slate-500 font-medium mb-1">Ordenar catálogo por</label>
                           <select
                             value={sortBy}
                             onChange={(e) => setSortBy(e.target.value as any)}
                             className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
                           >
-                            <option value="name">Product Name (A-Z)</option>
-                            <option value="price_asc">Price: Low to High</option>
-                            <option value="price_desc">Price: High to Low</option>
-                            <option value="unitprice_asc">Unit Value: Best Metric</option>
+                            <option value="name">Nombre del producto (A-Z)</option>
+                            <option value="price_asc">Precio: Menor a Mayor</option>
+                            <option value="price_desc">Precio: Mayor a Menor</option>
+                            <option value="unitprice_asc">Valor Unitario: Mejor relación</option>
                           </select>
                         </div>
                       </div>
 
+                    </div>
+
+                    {/* Online Search Panel (API + Scrape) */}
+                    <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex flex-col gap-3">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                          <Globe className="w-4 h-4 text-emerald-500" />
+                          Búsqueda Online (API + Web)
+                        </h4>
+                        {onlineSearchResults.length > 0 && (
+                          <button onClick={() => { setOnlineSearchResults([]); setOnlineSearchQuery(""); }}
+                            className="text-[10px] text-slate-400 hover:text-slate-600">
+                            Limpiar resultados
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex gap-2">
+                        <DebouncedInput type="text" placeholder="Ej: arroz, leche, huevos..."
+                          value={onlineSearchQuery}
+                          onChange={setOnlineSearchQuery}
+                          onEnter={(val) => executeOnlineSearch(val)}
+                          className="flex-1 px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:border-emerald-500 focus:outline-none" />
+                        <button onClick={() => executeOnlineSearch(onlineSearchQuery)}
+                          disabled={isSearchingOnline}
+                          className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-4 py-2 rounded-xl text-xs transition flex items-center gap-1.5 active:scale-95 shadow">
+                          {isSearchingOnline ? (
+                            <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Buscando...</>
+                          ) : (
+                            <><Search className="w-3.5 h-3.5" /> Buscar Online</>
+                          )}
+                        </button>
+                      </div>
+
+                      {/* Online Search Results Table */}
+                      {onlineSearchResults.length > 0 && (
+                        <div className="overflow-x-auto">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-xs font-bold text-slate-600">
+                              Resultados para "{onlineSearchQuery}" ({onlineSearchResults.length} productos)
+                            </span>
+                            <button onClick={handleAddAllApiProductsToCatalog}
+                              className="bg-sky-600 hover:bg-sky-700 text-white font-semibold px-3 py-1.5 rounded-lg text-[10px] transition flex items-center gap-1 active:scale-95 shadow">
+                              <Plus className="w-3 h-3" />
+                              Agregar Todos al Catálogo
+                            </button>
+                          </div>
+                          <table className="w-full text-xs border-collapse">
+                            <thead>
+                              <tr className="bg-slate-50 border-b border-slate-200">
+                                <th className="text-left p-2 font-bold text-slate-600 whitespace-nowrap">Tienda</th>
+                                <th className="text-left p-2 font-bold text-slate-600 whitespace-nowrap">Marca</th>
+                                <th className="text-left p-2 font-bold text-slate-600 whitespace-nowrap">Producto</th>
+                                <th className="text-left p-2 font-bold text-slate-600 whitespace-nowrap">Presentación</th>
+                                <th className="text-right p-2 font-bold text-slate-600 whitespace-nowrap">Precio</th>
+                                <th className="text-right p-2 font-bold text-slate-600 whitespace-nowrap">Precio x Unidad</th>
+                                <th className="text-left p-2 font-bold text-slate-600 whitespace-nowrap">Ofertas</th>
+                                <th className="text-center p-2 font-bold text-slate-600 whitespace-nowrap">Agregar</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {onlineSearchResults.map((item, idx) => (
+                                <tr key={idx} className="border-b border-slate-100 hover:bg-slate-50/50">
+                                  <td className="p-2 text-slate-700 font-medium">{item.shop}</td>
+                                  <td className="p-2 text-slate-600">{item.brand || "-"}</td>
+                                  <td className="p-2 text-slate-800 font-semibold">{item.productName}</td>
+                                  <td className="p-2 text-slate-600 whitespace-nowrap">{item.presentation}</td>
+                                  <td className="p-2 text-right text-slate-800 font-bold whitespace-nowrap">${item.price.toFixed(2)}</td>
+                                  <td className="p-2 text-right text-slate-500 font-mono whitespace-nowrap">{formatUnitPrice(item.unitPrice, item.baseUnit)}</td>
+                                  <td className="p-2 text-emerald-600 text-[10px] max-w-[120px] truncate">{item.discountsAndDeals || "-"}</td>
+                                  <td className="p-2 text-center">
+                                    <button onClick={() => handleAddApiProductToCatalog(item)}
+                                      className="text-sky-600 hover:text-sky-700 bg-sky-50 hover:bg-sky-100 p-1.5 rounded-lg transition active:scale-95"
+                                      title="Agregar al catálogo">
+                                      <Plus className="w-3.5 h-3.5" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
                     </div>
 
                     {/* Master Results List (Unique Items) */}
@@ -2592,7 +3073,7 @@ export default function App() {
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2">
                                   <span className="text-xs font-medium text-sky-600 bg-sky-50 px-2 py-0.5 rounded-full">
-                                    {product.category}
+                                    {translateCategory(product.category)}
                                   </span>
                                   <span className="text-[10px] text-slate-400 font-mono">
                                     {new Date(product.dateExtracted).toLocaleDateString()}
@@ -2605,7 +3086,7 @@ export default function App() {
                                     {product.supermarket}
                                   </span>
                                   <span>•</span>
-                                  <span>Pack size: {product.amount} {product.unit}</span>
+                                  <span>Tamaño: {product.amount} {product.unit}</span>
                                 </div>
                               </div>
 
@@ -2664,11 +3145,11 @@ export default function App() {
                       <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Add Custom Direct Reference Price</h4>
                       <form onSubmit={addManualProduct} className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
                         <div className="col-span-2 sm:col-span-1 md:col-span-2">
-                          <input
+                          <DebouncedInput
                             type="text"
                             placeholder="Product Name"
                             value={customItemName}
-                            onChange={(e) => setCustomItemName(e.target.value)}
+                            onChange={setCustomItemName}
                             className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
                             required
                           />
@@ -2690,39 +3171,39 @@ export default function App() {
                           </select>
                         </div>
                         <div>
-                          <input
+                          <DebouncedInput
                             type="text"
                             placeholder="Price ($)"
                             value={customItemPrice}
-                            onChange={(e) => setCustomItemPrice(e.target.value)}
+                            onChange={setCustomItemPrice}
                             className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
                             required
                           />
                         </div>
                         <div className="grid grid-cols-2 gap-1">
-                          <input
+                          <DebouncedInput
                             type="number"
                             placeholder="Qty"
                             value={customItemAmount}
-                            onChange={(e) => setCustomItemAmount(e.target.value)}
+                            onChange={setCustomItemAmount}
                             className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
                             required
                           />
-                          <input
+                          <DebouncedInput
                             type="text"
                             placeholder="Unit"
                             value={customItemUnit}
-                            onChange={(e) => setCustomItemUnit(e.target.value)}
+                            onChange={setCustomItemUnit}
                             className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
                             required
                           />
                         </div>
                         <div>
-                          <input
+                          <DebouncedInput
                             type="text"
                             placeholder="Store Name"
                             value={customItemSupermarket}
-                            onChange={(e) => setCustomItemSupermarket(e.target.value)}
+                            onChange={setCustomItemSupermarket}
                             className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none animate-pulse"
                           />
                         </div>
@@ -2746,7 +3227,7 @@ export default function App() {
                         <div className="flex justify-between items-start gap-2 mb-3">
                           <div>
                             <span className="text-[10px] text-sky-600 font-bold bg-sky-50 px-2 py-0.5 rounded-full uppercase tracking-wide">
-                              {selectedCompareProduct.category}
+                              {translateCategory(selectedCompareProduct.category)}
                             </span>
                             <h3 className="text-base font-bold text-slate-800 mt-1">{selectedCompareProduct.name}</h3>
                           </div>
@@ -2754,7 +3235,7 @@ export default function App() {
                             onClick={() => setSelectedCompareProduct(null)}
                             className="text-slate-300 hover:text-slate-500 text-xs font-semibold"
                           >
-                            Clear
+                            Cerrar
                           </button>
                         </div>
 
@@ -3156,41 +3637,41 @@ export default function App() {
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
                               <div className="md:col-span-2">
                                 <label className="block text-slate-500 font-semibold mb-1">Nombre del Producto</label>
-                                <input
+                                <DebouncedInput
                                   type="text"
                                   value={scannedItem.productName}
-                                  onChange={(e) => setScannedItem({ ...scannedItem, productName: e.target.value })}
+                                  onChange={(val) => setScannedItem(prev => ({ ...prev, productName: val }))}
                                   className="w-full bg-white border border-slate-300 rounded-lg p-2 font-semibold text-slate-800"
                                 />
                               </div>
 
                               <div>
                                 <label className="block text-slate-500 font-semibold mb-1">Precio ($ ARS)</label>
-                                <input
+                                <DebouncedInput
                                   type="number"
                                   step="0.01"
-                                  value={scannedItem.price}
-                                  onChange={(e) => setScannedItem({ ...scannedItem, price: Number(e.target.value) || 0 })}
+                                  value={String(scannedItem.price)}
+                                  onChange={(val) => setScannedItem(prev => ({ ...prev, price: Number(val) || 0 }))}
                                   className="w-full bg-white border border-slate-300 rounded-lg p-2 font-semibold text-slate-800"
                                 />
                               </div>
 
                               <div>
                                 <label className="block text-slate-500 font-semibold mb-1">Supermercado</label>
-                                <input
+                                <DebouncedInput
                                   type="text"
                                   value={scannedItem.supermarket}
-                                  onChange={(e) => setScannedItem({ ...scannedItem, supermarket: e.target.value })}
+                                  onChange={(val) => setScannedItem(prev => ({ ...prev, supermarket: val }))}
                                   className="w-full bg-white border border-slate-300 rounded-lg p-2 font-semibold text-slate-800"
                                 />
                               </div>
 
                               <div>
                                 <label className="block text-slate-500 font-semibold mb-1">Cantidad Neto / Contenido</label>
-                                <input
+                                <DebouncedInput
                                   type="number"
-                                  value={scannedItem.amount}
-                                  onChange={(e) => setScannedItem({ ...scannedItem, amount: Number(e.target.value) || 1 })}
+                                  value={String(scannedItem.amount)}
+                                  onChange={(val) => setScannedItem(prev => ({ ...prev, amount: Number(val) || 1 }))}
                                   className="w-full bg-white border border-slate-300 rounded-lg p-2 font-semibold text-slate-800"
                                 />
                               </div>
@@ -3370,77 +3851,102 @@ export default function App() {
                           </div>
 
                           {/* DYNAMIC COMPARISON WITH ARGENTINIAN ONLINE SEARCH CATALOGS */}
-                          <div className="bg-gradient-to-br from-slate-900 to-indigo-950 text-white p-4 rounded-xl border border-slate-800 shadow-lg relative overflow-hidden">
-                            <div className="absolute top-0 right-0 p-6 opacity-5 pointer-events-none">
-                              <Globe className="w-24 h-24 text-white" />
-                            </div>
-
-                            <h3 className="text-xs font-bold uppercase tracking-widest text-sky-400 mb-2 flex items-center gap-1.5">
-                              <Globe className="w-4 h-4 text-sky-400 animate-spin-slow" />
-                              Comparador de Buscadores Online (IA)
-                            </h3>
-                            <p className="text-[11px] text-slate-300 md:max-w-md mb-3 font-sans leading-relaxed">
-                              Busque al instante en los portales webs argentinos el producto observado en góndola. Utilice los tips para optimizar las ofertas automáticas de los buscadores interpretados.
-                            </p>
-
-                            {customSearchUrls.length === 0 ? (
-                              <p className="text-xs italic text-slate-400">No hay buscadores configurados. Puede agregar plantillas en Ajustes.</p>
-                            ) : (
+                          {/* Site search links (clickable buttons) */}
+                          {catalogSources.filter(s => s.siteSearchEnabled && s.searchUrlTemplate).length > 0 && (
+                            <div className="bg-gradient-to-br from-slate-900 to-indigo-950 text-white p-4 rounded-xl border border-slate-800 shadow-lg relative overflow-hidden">
+                              <div className="absolute top-0 right-0 p-6 opacity-5 pointer-events-none">
+                                <Globe className="w-24 h-24 text-white" />
+                              </div>
+                              <h3 className="text-xs font-bold uppercase tracking-widest text-sky-400 mb-2 flex items-center gap-1.5">
+                                <Globe className="w-4 h-4 text-sky-400 animate-spin-slow" />
+                                Buscadores
+                              </h3>
+                              <p className="text-[11px] text-slate-300 mb-3 font-sans">
+                                Abrir "{scannedItem.productName}" en los sitios web de los supermercados.
+                              </p>
                               <div className="space-y-2.5">
-                                {customSearchUrls.map((engine) => {
+                                {catalogSources.filter(s => s.siteSearchEnabled && s.searchUrlTemplate).map((s) => {
                                   const encodedQuery = encodeURIComponent(scannedItem.productName);
-                                  const searchUrlWithQuery = engine.urlTemplate.replace("{producto}", encodedQuery);
-
+                                  const searchUrl = s.searchUrlTemplate!.replace("{producto}", encodedQuery);
                                   return (
-                                    <div key={engine.id} className="bg-slate-800/60 p-2.5 rounded-lg border border-slate-700/60 flex flex-col gap-2">
+                                    <div key={s.id} className="bg-slate-800/60 p-2.5 rounded-lg border border-slate-700/60 flex flex-col gap-2">
                                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
                                         <div>
-                                          <h4 className="text-xs font-bold text-sky-100">{engine.name}</h4>
-                                          {engine.description && (
-                                            <p className="text-[10px] text-slate-400 leading-snug">{engine.description}</p>
-                                          )}
+                                          <h4 className="text-xs font-bold text-sky-100">{s.name}</h4>
+                                          {s.description && <p className="text-[10px] text-slate-400 leading-snug">{s.description}</p>}
                                         </div>
-
-                                        <a
-                                          href={searchUrlWithQuery}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          className="text-[11px] font-bold text-slate-950 bg-sky-400 hover:bg-sky-300 px-3 py-1.5 rounded-md flex items-center justify-center gap-1 transition shrink-0 active:scale-95"
-                                        >
-                                          🔍 Buscar en {engine.name.split(" ")[0]}
+                                        <a href={searchUrl} target="_blank" rel="noreferrer"
+                                          className="text-[11px] font-bold text-slate-950 bg-sky-400 hover:bg-sky-300 px-3 py-1.5 rounded-md flex items-center justify-center gap-1 transition shrink-0 active:scale-95">
+                                          🔍 Buscar en {s.name.split(" ")[0]}
                                         </a>
                                       </div>
-
-                                      {/* AI Interpretation toggleable panel */}
-                                      {engine.aiInterpretation ? (
+                                      {s.aiInterpretation && (
                                         <div className="bg-slate-900/80 p-2 rounded border border-slate-700/50 text-[10px] text-slate-300 space-y-1 font-serif leading-normal whitespace-pre-wrap">
-                                          {engine.aiInterpretation}
-                                        </div>
-                                      ) : (
-                                        <div className="flex items-center justify-between gap-2 bg-slate-900/40 p-1.5 rounded">
-                                          <span className="text-[9px] text-slate-400">Sin interpretación de IA generada aún.</span>
-                                          <button
-                                            onClick={() => handleInterpretSearchUrl(engine)}
-                                            disabled={interpretingUrlId === engine.id}
-                                            className="text-[9px] font-bold text-sky-300 hover:text-sky-200 underline transition flex items-center gap-1"
-                                          >
-                                            {interpretingUrlId === engine.id ? (
-                                              <>
-                                                <RefreshCw className="w-2.5 h-2.5 animate-spin" />
-                                                Interpretando...
-                                              </>
-                                            ) : (
-                                              "✨ Interpretar con IA"
-                                            )}
-                                          </button>
+                                          {s.aiInterpretation}
                                         </div>
                                       )}
                                     </div>
                                   );
                                 })}
                               </div>
-                            )}
-                          </div>
+                            </div>
+                          )}
+
+                          {/* Online Search (API + Scrape) */}
+                          {catalogSources.filter(s => s.searchMethod !== "none").length > 0 && (
+                            <div className="bg-gradient-to-br from-emerald-950 to-teal-950 text-white p-4 rounded-xl border border-emerald-800 shadow-lg">
+                              <h3 className="text-xs font-bold uppercase tracking-widest text-emerald-400 mb-2 flex items-center gap-1.5">
+                                <Database className="w-4 h-4 text-emerald-400" />
+                                Buscar Precios Online
+                              </h3>
+                              <p className="text-[11px] text-slate-300 mb-3 font-sans">
+                                Busca "{scannedItem.productName}" en las fuentes configuradas (API + Web).
+                              </p>
+                              <button onClick={() => executeOnlineSearch(scannedItem.productName)}
+                                disabled={isSearchingOnline}
+                                className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-400 text-white font-semibold px-4 py-2 rounded-xl text-xs transition flex items-center gap-1.5 active:scale-95 shadow">
+                                {isSearchingOnline ? (
+                                  <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Buscando...</>
+                                ) : (
+                                  <><Search className="w-3.5 h-3.5" /> Buscar Precios Online</>
+                                )}
+                              </button>
+
+                              {/* Inline results */}
+                              {onlineSearchResults.length > 0 && onlineSearchQuery === scannedItem.productName && (
+                                <div className="mt-3 max-h-48 overflow-y-auto">
+                                  <table className="w-full text-[10px] border-collapse">
+                                    <thead>
+                                      <tr className="border-b border-emerald-700/50">
+                                        <th className="text-left p-1.5 font-bold text-emerald-300">Tienda</th>
+                                        <th className="text-left p-1.5 font-bold text-emerald-300">Producto</th>
+                                        <th className="text-left p-1.5 font-bold text-emerald-300">Presentación</th>
+                                        <th className="text-right p-1.5 font-bold text-emerald-300">Precio</th>
+                                        <th className="text-center p-1.5 font-bold text-emerald-300"></th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {onlineSearchResults.map((item, idx) => (
+                                        <tr key={idx} className="border-b border-emerald-800/30 hover:bg-emerald-900/30">
+                                          <td className="p-1.5 text-slate-200">{item.shop}</td>
+                                          <td className="p-1.5 text-white font-medium">{item.productName}</td>
+                                          <td className="p-1.5 text-slate-300 whitespace-nowrap">{item.presentation}</td>
+                                          <td className="p-1.5 text-right text-emerald-300 font-bold whitespace-nowrap">${item.price.toFixed(2)}</td>
+                                          <td className="p-1.5 text-center">
+                                            <button onClick={() => handleAddApiProductToCatalog(item)}
+                                              className="text-emerald-300 hover:text-emerald-200 bg-emerald-800/50 hover:bg-emerald-700/50 p-1 rounded transition"
+                                              title="Agregar al catálogo">
+                                              <Plus className="w-3 h-3" />
+                                            </button>
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                            </div>
+                          )}
 
                           {/* Botones de Acción */}
                           <div className="flex flex-col sm:flex-row gap-2 mt-2">
@@ -4789,127 +5295,28 @@ export default function App() {
                 )}
               </div>
 
-              {/* NUEVA SECCIÓN: Google Sheets Base de Datos en la Nube */}
               <div id="panel-gsheets" className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col gap-4">
-                <div className="border-b border-slate-100 pb-3 flex justify-between items-center flex-wrap gap-2">
-                  <div>
-                    <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
-                      <Database className="w-5 h-5 text-emerald-500" />
-                      Google Sheets como Base de Datos
-                    </h3>
-                    <p className="text-xs text-slate-500 mt-1">
-                      Use una planilla de Google Sheets como base de datos en la nube. Guarda su historial de compras reales y el catálogo de ofertas recopilado de folletos de manera persistente.
-                    </p>
-                  </div>
-                  <div>
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input
-                        id="toggle-gsheets"
-                        type="checkbox"
-                        checked={gsheetsEnabled}
-                        onChange={(e) => {
-                          const val = e.target.checked;
-                          setGsheetsEnabled(val);
-                          localStorage.setItem("bp_gsheets_enabled", String(val));
-                          if (val) {
-                            triggerSuccess("Base de datos por Google Sheets habilitada. Complete SSID y URL de GAS, luego haga clic en Sincronizar.");
-                          } else {
-                            triggerSuccess("Base de datos deshabilitada. Guardando localmente en este navegador.");
-                          }
-                        }}
-                        className="sr-only peer"
-                      />
-                      <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500"></div>
-                      <span className="ml-2 text-xs font-semibold text-slate-700">Activo</span>
-                    </label>
-                  </div>
-                </div>
-
-                <div className="space-y-4 font-sans text-xs">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-slate-600 font-bold mb-1">ID de Google Sheet (SSID) *</label>
-                      <input
-                        id="input-gsheets-ssid"
-                        type="text"
-                        placeholder="Ej: 1A2b3c4D5e6F7g8H9i0J_kLmNoP"
-                        value={gsheetsSSID}
-                        onChange={(e) => {
-                          setGsheetsSSID(e.target.value);
-                          localStorage.setItem("bp_gsheets_ssid", e.target.value);
-                        }}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 focus:border-emerald-500 focus:outline-none font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-slate-600 font-bold mb-1">URL de la Web App de Apps Script (GAS) *</label>
-                      <input
-                        id="input-gsheets-url"
-                        type="text"
-                        placeholder="Ej: https://script.google.com/macros/s/AKfycb.../exec"
-                        value={gsheetsUrl}
-                        onChange={(e) => {
-                          setGsheetsUrl(e.target.value);
-                          localStorage.setItem("bp_gsheets_url", e.target.value);
-                        }}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 focus:border-emerald-500 focus:outline-none font-mono"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      id="btn-gsheets-sync"
-                      onClick={() => handleSyncGSheets()}
-                      disabled={isSyncingGSheets || !gsheetsEnabled}
-                      className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-100 disabled:text-slate-400 text-white font-bold py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 transition active:scale-95 shadow cursor-pointer text-xs"
-                    >
-                      {isSyncingGSheets ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin" />
-                          Sincronizando...
-                        </>
-                      ) : (
-                        <>
-                          <RefreshCw className="w-4 h-4" />
-                          Sincronizar y Fusionar con Sheets
-                        </>
-                      )}
-                    </button>
-                    <button
-                      id="btn-gsheets-share"
-                      onClick={handleShareGSheets}
-                      disabled={!gsheetsSSID && !gsheetsUrl}
-                      className="bg-slate-100 hover:bg-slate-200 disabled:bg-slate-50 disabled:text-slate-400 border border-slate-200 text-slate-700 font-bold py-2.5 px-4 rounded-xl flex items-center justify-center gap-2 transition active:scale-95 cursor-pointer text-xs"
-                      title="Copiar enlace con SSID y URL de GAS para acceder directamente o compartir su configuración"
-                    >
-                      <Share2 className="w-4 h-4 text-slate-500" />
-                      Compartir Enlace
-                    </button>
-                  </div>
-
-                  {gsheetsSyncMessage && (
-                    <div className={`p-3 rounded-xl border flex items-start gap-2 ${
-                      gsheetsSyncStatus === "success" 
-                        ? "bg-emerald-50 border-emerald-100 text-emerald-800" 
-                        : gsheetsSyncStatus === "error"
-                        ? "bg-rose-50 border-rose-100 text-rose-800"
-                        : "bg-blue-50 border-blue-100 text-blue-800"
-                    }`}>
-                      {gsheetsSyncStatus === "success" ? (
-                        <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                      ) : gsheetsSyncStatus === "error" ? (
-                        <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                      ) : (
-                        <RefreshCw className="w-4 h-4 text-blue-600 shrink-0 animate-spin mt-0.5" />
-                      )}
-                      <div>
-                        <span className="font-semibold block text-xs">Estado de Sincronización</span>
-                        <p className="text-[11px] mt-0.5 leading-relaxed">{gsheetsSyncMessage}</p>
-                      </div>
-                    </div>
-                  )}
+                <GSheetsConfigForm
+                  gsheetsUrl={gsheetsUrl}
+                  gsheetsSSID={gsheetsSSID}
+                  gsheetsEnabled={gsheetsEnabled}
+                  isSyncing={isSyncingGSheets}
+                  syncStatus={gsheetsSyncStatus}
+                  syncMessage={gsheetsSyncMessage}
+                  onToggleEnabled={(val) => {
+                    setGsheetsEnabled(val);
+                    localStorage.setItem("bp_gsheets_enabled", String(val));
+                    triggerSuccess(val ? "Base de datos por Google Sheets habilitada." : "Base de datos deshabilitada.");
+                  }}
+                  onSync={(url, ssid) => {
+                    setGsheetsUrl(url);
+                    setGsheetsSSID(ssid);
+                    localStorage.setItem("bp_gsheets_url", url);
+                    localStorage.setItem("bp_gsheets_ssid", ssid);
+                    handleSyncGSheets(url, ssid);
+                  }}
+                  onShare={handleShareGSheets}
+                />
 
                   {/* Código GAS Instrucciones colapsables */}
                   <div className="bg-slate-50 p-4 border border-slate-200 rounded-xl">
@@ -4930,6 +5337,18 @@ export default function App() {
   CÓDIGO COMPLETO DE GOOGLE APPS SCRIPT (GAS)
   Pegar esto íntegramente en Extensiones > Apps Script
 */
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("SuperAhorroIA")
+    .addItem("Autorizar Proxy (UrlFetchApp)", "authorizeProxy")
+    .addToUi();
+}
+
+function authorizeProxy() {
+  UrlFetchApp.fetch("https://example.com");
+  SpreadsheetApp.getUi().alert("Autorizado correctamente. Ya puede usar el proxy.");
+}
 
 function doGet(e) {
   var action = e.parameter.action;
@@ -5015,11 +5434,10 @@ function doPost(e) {
     var rawBody = e.postData.contents;
     var data = JSON.parse(rawBody);
     var action = data.action;
-    var ssid = data.ssid;
-    
-    var ss = SpreadsheetApp.openById(ssid);
     
     if (action === "syncAll") {
+      var ssid = data.ssid;
+      var ss = SpreadsheetApp.openById(ssid);
       var pSheet = ss.getSheetByName("Products") || ss.insertSheet("Products");
       pSheet.clear();
       var pHeaders = ["id", "name", "category", "originalPrice", "salePrice", "amount", "unit", "baseUnit", "unitPrice", "supermarket", "sourceType", "startDate", "endDate", "dateExtracted"];
@@ -5081,6 +5499,22 @@ function doPost(e) {
       return ContentService.createTextOutput(JSON.stringify({ status: "success" }))
                            .setMimeType(ContentService.MimeType.JSON);
     }
+    
+    if (action === "proxyFetch") {
+      var targetUrl = data.targetUrl;
+      var method = data.method || "GET";
+      var reqHeaders = data.headers || {};
+      var payload = data.body || null;
+      var opts = { method: method, headers: reqHeaders, muteHttpExceptions: true };
+      if (payload) { opts.payload = payload; }
+      var gasResponse = UrlFetchApp.fetch(targetUrl, opts);
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "success",
+        body: gasResponse.getContentText(),
+        responseCode: gasResponse.getResponseCode(),
+        headers: gasResponse.getHeaders()
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
   } catch (err) {
     return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() }))
                          .setMimeType(ContentService.MimeType.JSON);
@@ -5089,119 +5523,74 @@ function doPost(e) {
                       </pre>
                     </details>
                   </div>
-                </div>
               </div>
 
-              {/* DYNAMIC SEARCH URL MANAGEMENT SECTION */}
+              {/* CATÁLOGOS EN LÍNEA (unified section) */}
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col gap-4">
                 <div className="border-b border-slate-100 pb-3 font-sans">
                   <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
-                    <Globe className="w-5 h-5 text-indigo-500" />
-                    Buscadores de Supermercados (Argentina)
+                    <Database className="w-5 h-5 text-indigo-500" />
+                    Búsqueda en catálogos en línea
                   </h3>
                   <p className="text-xs text-slate-500 mt-1">
-                    Configure portales de venta online para activar la búsqueda instantánea con un clic desde el Escáner de Góndola. La IA generará pautas de búsqueda y tips específicos para cada cadena.
+                    Configura supermercados para buscar precios. Cada catálogo puede tener un enlace directo (para abrir en el navegador),
+                    una API (para búsqueda programática JSON) o scraping web (para extraer HTML). Tú eliges el método por catálogo.
                   </p>
                 </div>
 
-                {/* Formulario de Alta de nuevo motor */}
-                <form onSubmit={handleSaveSearchUrl} className="bg-slate-50/50 p-4 border border-slate-100 rounded-xl space-y-3 font-sans">
-                  <span className="text-[10px] font-bold tracking-widest text-indigo-600 uppercase">Agregar nuevo buscador manual</span>
-                  
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                    <div>
-                      <label className="block text-slate-600 font-semibold mb-1">Nombre del Supermercado</label>
-                      <input
-                        type="text"
-                        placeholder="Ej: Coto Digital, ChangoMas, etc"
-                        value={newSearchUrlName}
-                        onChange={(e) => setNewSearchUrlName(e.target.value)}
-                        className="w-full bg-white border border-slate-200 rounded-lg p-2 focus:border-indigo-500 focus:outline-none"
-                      />
-                    </div>
+                <CatalogSourceForm
+                  initialData={editingCatalogSource}
+                  interpretingId={interpretingSourceId}
+                  onSave={handleSaveCatalogSource}
+                  onDelete={handleDeleteCatalogSource}
+                  onCancel={() => setEditingCatalogSource(null)}
+                  onInterpret={handleInterpretCatalogSource}
+                />
 
-                    <div>
-                      <label className="block text-slate-600 font-semibold mb-1">Descripción corta</label>
-                      <input
-                        type="text"
-                        placeholder="Ej: Ofertas del día y sucursal CABA"
-                        value={newSearchUrlDesc}
-                        onChange={(e) => setNewSearchUrlDesc(e.target.value)}
-                        className="w-full bg-white border border-slate-200 rounded-lg p-2 focus:border-indigo-500 focus:outline-none"
-                      />
-                    </div>
-
-                    <div className="sm:col-span-2">
-                      <label className="block text-slate-600 font-semibold mb-1">Plantilla de URL de Búsqueda (Con marcador <span className="font-mono text-indigo-600 font-bold">{"{producto}"}</span>)</label>
-                      <input
-                        type="text"
-                        placeholder="Ej: https://www.cotodigital3.com.ar/sitios/cdg/busqueda?_dyncharset=utf-8&Ntt={producto}"
-                        value={newSearchUrlTemplate}
-                        onChange={(e) => setNewSearchUrlTemplate(e.target.value)}
-                        className="w-full bg-white border border-slate-200 rounded-lg p-2 font-mono text-slate-700 text-[11px] focus:border-indigo-500 focus:outline-none placeholder-slate-400"
-                      />
-                      <span className="text-[9px] text-slate-400 block mt-1">El sistema reemplazará automáticamente {"{producto}"} con el nombre del artículo escaneado o seleccionado.</span>
-                    </div>
-                  </div>
-
-                  <button
-                    type="submit"
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-xl text-xs transition shadow active:scale-95 flex items-center gap-1"
-                  >
-                    <Plus className="w-4 h-4" />
-                    Guardar Buscador
-                  </button>
-                </form>
-
-                {/* Listado de Motores Activos */}
+                {/* Sources List */}
                 <div className="space-y-2 font-sans">
-                  <h4 className="text-xs font-bold text-slate-700">Motores de búsqueda activos ({customSearchUrls.length})</h4>
-                  
-                  {customSearchUrls.length === 0 ? (
-                    <p className="text-xs italic text-slate-400">No hay buscadores configurados en su base de datos local.</p>
+                  <h4 className="text-xs font-bold text-slate-700">Catálogos configurados ({catalogSources.length})</h4>
+                  {catalogSources.length === 0 ? (
+                    <p className="text-xs italic text-slate-400">No hay catálogos configurados. Agrega uno usando el formulario de arriba.</p>
                   ) : (
                     <div className="grid grid-cols-1 gap-2">
-                      {customSearchUrls.map((urlItem) => (
-                        <div key={urlItem.id} className="bg-white p-3 rounded-xl border border-slate-200/60 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
+                      {catalogSources.map((s) => (
+                        <div key={s.id} className="bg-white p-3 rounded-xl border border-slate-200/60 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
                           <div className="space-y-1 max-w-md">
                             <span className="font-bold text-slate-800 flex items-center gap-1.5">
-                              <span className="w-2 h-2 rounded-full bg-indigo-500" />
-                              {urlItem.name}
+                              <span className={`w-2 h-2 rounded-full ${s.siteSearchEnabled ? "bg-sky-500" : "bg-slate-300"}`} />
+                              {s.name}
+                              {s.searchMethod === "api" && <span className="text-[9px] text-emerald-600 font-normal bg-emerald-50 px-1.5 py-0.5 rounded">API</span>}
+                              {s.searchMethod === "scrape" && <span className="text-[9px] text-sky-600 font-normal bg-sky-50 px-1.5 py-0.5 rounded">Scrape</span>}
+                              {s.searchMethod === "none" && <span className="text-[9px] text-slate-400 font-normal">solo enlace</span>}
                             </span>
-                            <p className="text-[10px] text-slate-500">{urlItem.description}</p>
-                            <span className="text-[9px] block text-slate-400 truncate max-w-xs md:max-w-lg font-mono">{urlItem.urlTemplate}</span>
-
-                            {urlItem.aiInterpretation && (
-                              <div className="mt-2 bg-indigo-50/50 p-2 rounded border border-indigo-100 text-[10px] text-slate-700 whitespace-pre-wrap font-serif">
-                                {urlItem.aiInterpretation}
-                              </div>
+                            {s.description && <p className="text-[10px] text-slate-500">{s.description}</p>}
+                            {s.searchUrlTemplate && (
+                              <span className="text-[9px] block text-slate-400 truncate max-w-xs md:max-w-lg font-mono">
+                                {s.searchUrlTemplate}
+                              </span>
+                            )}
+                            {s.searchMethod === "api" && s.apiUrl && (
+                              <span className="text-[9px] text-emerald-600 block font-mono truncate max-w-xs md:max-w-lg">
+                                API: {s.apiMethod} {s.apiUrl}
+                              </span>
+                            )}
+                            {s.searchMethod === "scrape" && (
+                              <span className="text-[9px] text-sky-600 block">Scraping web activo</span>
                             )}
                           </div>
-
                           <div className="flex items-center gap-1.5 self-end md:self-center shrink-0">
-                            <button
-                              onClick={() => handleInterpretSearchUrl(urlItem)}
-                              disabled={interpretingUrlId === urlItem.id}
-                              className="bg-slate-100 hover:bg-indigo-50 text-indigo-700 hover:text-indigo-800 font-semibold px-2.5 py-1.5 rounded-lg border border-slate-200 text-[10px] transition flex items-center gap-1 disabled:opacity-50"
-                            >
-                              {interpretingUrlId === urlItem.id ? (
-                                <>
-                                  <RefreshCw className="w-3 h-3 animate-spin" />
-                                  Analizando...
-                                </>
-                              ) : (
-                                <>
-                                  <Sparkles className="w-3 h-3 text-indigo-500" />
-                                  Interpretar con IA
-                                </>
-                              )}
+                            <button onClick={() => setEditingCatalogSource(s)}
+                              className="bg-slate-100 hover:bg-indigo-50 text-indigo-700 hover:text-indigo-800 font-semibold px-2.5 py-1.5 rounded-lg border border-slate-200 text-[10px] transition flex items-center gap-1">
+                              Editar
                             </button>
-
-                            <button
-                              onClick={() => handleDeleteSearchUrl(urlItem.id, urlItem.name)}
+                            <button onClick={() => handleTestCatalogSource(s)} disabled={testingSourceId === s.id}
+                              className="bg-slate-100 hover:bg-amber-50 text-amber-700 hover:text-amber-800 font-semibold px-2.5 py-1.5 rounded-lg border border-slate-200 text-[10px] transition flex items-center gap-1 disabled:opacity-50">
+                              {testingSourceId === s.id ? "Probando..." : "Probar"}
+                            </button>
+                            <button onClick={() => handleDeleteCatalogSource(s.id, s.name)}
                               className="text-rose-500 hover:text-rose-600 font-bold bg-rose-50 hover:bg-rose-100 p-1.5 rounded-lg border border-rose-100 transition"
-                              title="Eliminar Buscador"
-                            >
+                              title="Eliminar">
                               <Trash className="w-4 h-4" />
                             </button>
                           </div>
@@ -5210,7 +5599,34 @@ function doPost(e) {
                     </div>
                   )}
                 </div>
+
+                {testResult && (
+                  <div className="bg-slate-900 text-slate-200 p-3 rounded-xl border border-slate-700 font-mono text-[10px] space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[9px] font-bold tracking-widest text-slate-400 uppercase">
+                        Respuesta Raw (test: "arroz") {testResult.method === "scrape" ? "- HTML Limpiado" : "- JSON"}
+                      </span>
+                      <button onClick={() => setTestResult(null)} className="text-slate-500 hover:text-slate-300 text-[11px]">&times;</button>
+                    </div>
+                    <div className="flex gap-2 text-[9px]">
+                      <span className={`font-bold ${testResult.status >= 200 && testResult.status < 300 ? "text-emerald-400" : "text-rose-400"}`}>
+                        HTTP {testResult.status || "SIN CONEXIÓN"}
+                      </span>
+                      {testResult.body.length > 0 && (
+                        <span className="text-slate-500">{testResult.body.length} bytes</span>
+                      )}
+                    </div>
+                    <pre className="text-[9px] text-slate-300 whitespace-pre-wrap break-all max-h-48 overflow-y-auto bg-slate-950 p-2 rounded border border-slate-800 select-all">
+                      {testResult.bodyPreview}
+                    </pre>
+                  </div>
+                )}
               </div>
+
+              <StoreAnalyzerWizard
+                apiKey={apiKey}
+                onAcceptAnalysis={handleAcceptWizardAnalysis}
+              />
 
               {/* Almacenamiento Local y Backups */}
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col gap-4 font-sans">
@@ -5239,25 +5655,6 @@ function doPost(e) {
                     >
                       <Download className="w-3.5 h-3.5" />
                       Descargar CSV
-                    </button>
-                  </div>
-
-                  {/* Seed Demo Data block */}
-                  <div className="border border-slate-200 p-4 rounded-xl flex flex-col justify-between items-start bg-slate-50/30">
-                    <div>
-                      <h4 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                        <Store className="w-4 h-4 text-sky-500" />
-                        Cargar Catálogo de Demostración
-                      </h4>
-                      <p className="text-[10px] text-slate-400 mt-1 leading-normal">
-                        Carga precios históricos argentinos simulados de Carrefour, Coto y Jumbo con sus pesos y litros metrificados para evaluar el graficador de ahorro.
-                      </p>
-                    </div>
-                    <button
-                      onClick={loadDemoData}
-                      className="mt-4 bg-sky-500 hover:bg-sky-600 text-slate-950 font-semibold px-3 py-2 rounded-lg text-xs transition active:scale-95 shadow"
-                    >
-                      Simular Precios de Referencia
                     </button>
                   </div>
 
