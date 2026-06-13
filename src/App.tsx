@@ -1,9 +1,9 @@
-/**
+﻿/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import {
   Search,
   Upload,
@@ -75,6 +75,9 @@ import CatalogSourceForm from "./CatalogSourceForm";
 import DebouncedInput from "./DebouncedInput";
 import StoreAnalyzerWizard from "./StoreAnalyzerWizard";
 import GSheetsConfigForm from "./GSheetsConfigForm";
+import CatalogTab from "./CatalogTab";
+import ScanTab from "./ScanTab";
+import ShoppingListTab from "./ShoppingListTab";
 
 export default function App() {
   // Shared States
@@ -112,6 +115,17 @@ export default function App() {
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Flash warning helper
+  const triggerError = useCallback((msg: string) => {
+    setErrorMessage(msg);
+    setTimeout(() => setErrorMessage(null), 6000);
+  }, [setErrorMessage]);
+
+  const triggerSuccess = useCallback((msg: string) => {
+    setSuccessMessage(msg);
+    setTimeout(() => setSuccessMessage(null), 4000);
+  }, [setSuccessMessage]);
 
   // Upload/AI states
   const [manualSupermarket, setManualSupermarket] = useState<string>("");
@@ -174,6 +188,8 @@ export default function App() {
   const [onlineSearchQuery, setOnlineSearchQuery] = useState<string>("");
   const [editingCatalogSource, setEditingCatalogSource] = useState<CatalogSource | null>(null);
   const [testingSourceId, setTestingSourceId] = useState<string | null>(null);
+  const [loginSource, setLoginSource] = useState<CatalogSource | null>(null);
+  const [loginFormData, setLoginFormData] = useState<Record<string, string>>({});
   const [testResult, setTestResult] = useState<{ id: string; status: number; body: string; bodyPreview: string; method: string } | null>(null);
 
   // Store analysis wizard state
@@ -440,7 +456,7 @@ export default function App() {
   };
 
   // Finds the last time a product was purchased by analyzing scanned/manual receipts
-  const getLastPurchaseInfo = (itemName: string) => {
+  const getLastPurchaseInfo = useCallback((itemName: string) => {
     if (!receipts || receipts.length === 0) return null;
 
     // Sort receipts by date descending (most recent first)
@@ -465,12 +481,12 @@ export default function App() {
       }
     }
     return null;
-  };
+  }, [receipts]);
 
   // Searches for active promotional offers from:
   // 1. Uploaded flyers (sourceType === "brochure")
   // 2. Online store catalogs (preset catalogs inside findSimilarOnlineProducts)
-  const getBestAvailableOffer = (itemName: string, category: string) => {
+  const getBestAvailableOffer = useCallback((itemName: string, category: string) => {
     const query = itemName.toLowerCase().trim();
 
     // Find similar items inside our database with active offers
@@ -518,7 +534,7 @@ export default function App() {
 
     // Pick the absolute cheapest offer
     return allOffers.sort((a, b) => a.price - b.price)[0];
-  };
+  }, [products]);
 
   // Load all records on boot
   useEffect(() => {
@@ -721,7 +737,7 @@ export default function App() {
     }
   };
 
-  const addScannedToCatalog = () => {
+  const addScannedToCatalog = useCallback(() => {
     if (!scannedItem) return;
 
     const norm = getUnitNormalization(scannedItem.amount || 1, scannedItem.unit || "unit");
@@ -748,7 +764,7 @@ export default function App() {
     // reset scanner view
     setScannedItem(null);
     setScanCapturedImage(null);
-  };
+  }, [scannedItem, setProducts, setScannedItem, setScanCapturedImage, triggerSuccess]);
 
   // ================= Receipts & Tickets Handlers =================
 
@@ -931,7 +947,7 @@ export default function App() {
     triggerSuccess("Compra eliminada del historial.");
   };
 
-  const handleGenerateLocalSuggestions = () => {
+  const handleGenerateLocalSuggestions = useCallback(() => {
     const allItems: { name: string; category: string; store: string; price: number; count: number }[] = [];
     receipts.forEach(r => {
       r.items.forEach(it => {
@@ -962,9 +978,9 @@ export default function App() {
 
     setSuggestedItems(converted);
     triggerSuccess("Sugerencias generadas basadas en frecuencia local.");
-  };
+  }, [receipts, setSuggestedItems, triggerSuccess]);
 
-  const handleGenerateAISuggestions = async () => {
+  const handleGenerateAISuggestions = useCallback(async () => {
     if (receipts.length === 0) {
       triggerError("Necesitas registrar al menos una compra en tu historial para recibir sugerencias.");
       return;
@@ -988,9 +1004,9 @@ export default function App() {
     } finally {
       setIsGeneratingSuggestions(false);
     }
-  };
+  }, [receipts, apiKey, setSuggestedItems, setIsGeneratingSuggestions, setSuggestionsError, triggerError, triggerSuccess, handleGenerateLocalSuggestions]);
 
-  const handleAddSuggestedToShopping = (suggestion: ShoppingListSuggestion) => {
+  const handleAddSuggestedToShopping = useCallback((suggestion: ShoppingListSuggestion) => {
     const itemId = `suggest-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     
     const shoppingListItem: ShoppingListItem = {
@@ -1012,7 +1028,7 @@ export default function App() {
     db.saveShoppingListItem(shoppingListItem);
     setShoppingList(db.getShoppingList());
     triggerSuccess(`¡Añadido ${shoppingListItem.name} a tu lista!`);
-  };
+  }, [setShoppingList, triggerSuccess]);
 
   const handleAddAllSuggestions = () => {
     if (suggestedItems.length === 0) return;
@@ -1043,19 +1059,8 @@ export default function App() {
     triggerSuccess(`¡Se añadieron ${count} productos sugeridos a tu planificador!`);
   };
 
-  // Flash warning helper
-  const triggerError = (msg: string) => {
-    setErrorMessage(msg);
-    setTimeout(() => setErrorMessage(null), 6000);
-  };
-
-  const triggerSuccess = (msg: string) => {
-    setSuccessMessage(msg);
-    setTimeout(() => setSuccessMessage(null), 4000);
-  };
-
   // Execute online price search across all enabled catalog sources (API + Scrape)
-  const executeOnlineSearch = async (query: string) => {
+  const executeOnlineSearch = useCallback(async (query: string) => {
     if (!query.trim()) {
       triggerError("Ingresa un producto para buscar.");
       return;
@@ -1088,7 +1093,7 @@ export default function App() {
       : [];
 
     async function fetchWithFallback(
-      targetUrl: string, sourceName: string, fetchOptions?: RequestInit, isJson = true
+      targetUrl: string, sourceName: string, fetchOptions?: RequestInit, isJson = true, sessionId?: string
     ): Promise<Response | null> {
       let response = await tryFetch(targetUrl, fetchOptions);
       if ((!response || !response.ok) && targetUrl !== gsheetsUrl && gsheetsUrl && gsheetsProxyEnabled) {
@@ -1098,6 +1103,7 @@ export default function App() {
             method: fetchOptions?.method || "GET",
             headers: (fetchOptions?.headers as Record<string, string>) || {},
             body: (fetchOptions as any)?.body || null,
+            ...(sessionId ? { sessionId } : {}),
           });
           console.log(`[${sourceName}] Trying GAS proxy for ${targetUrl.slice(0, 80)}...`);
           const gasRes = await fetch(gsheetsUrl, { method: "POST", mode: "cors", headers: { "Content-Type": "text/plain" }, body: gasBody });
@@ -1137,7 +1143,7 @@ export default function App() {
 
         targetUrl = urlObj.toString();
         console.log(`[${s.name}] Fetching API: ${targetUrl}`);
-        const response = await fetchWithFallback(targetUrl, s.name, fetchOptions, true);
+        const response = await fetchWithFallback(targetUrl, s.name, fetchOptions, true, s.sessionId);
 
         if (!response || !response.ok) {
           sourceErrors.push({ sourceName: s.name, error: response ? `HTTP ${response.status}` : "Sin conexión" });
@@ -1166,7 +1172,7 @@ export default function App() {
         if (!scrapeUrl) continue;
 
         console.log(`[${s.name}] Scraping: ${scrapeUrl}`);
-        const response = await fetchWithFallback(scrapeUrl, s.name, undefined, false);
+        const response = await fetchWithFallback(scrapeUrl, s.name, undefined, false, s.sessionId);
         if (!response || !response.ok) {
           sourceErrors.push({ sourceName: s.name, error: response ? `HTTP ${response.status}` : "Sin conexión" });
           continue;
@@ -1179,6 +1185,68 @@ export default function App() {
       } catch (err: any) {
         console.warn(`[${s.name}] Scrape fetch failed:`, err.message);
         sourceErrors.push({ sourceName: s.name, error: err.message || "Error desconocido" });
+      }
+    }
+
+    // Price simulation for sources with salesChannel (VTEX Checkout Simulation API)
+    const salesChannelSources = catalogSources.filter(s => s.salesChannel && s.searchMethod === "api");
+    if (salesChannelSources.length > 0 && rawResults.length > 0) {
+      for (const scSource of salesChannelSources) {
+        const match = rawResults.find(r => r.sourceName === scSource.name);
+        if (!match || !Array.isArray(match.rawData)) continue;
+
+        const skuIds: string[] = [];
+        for (const prod of match.rawData) {
+          if (prod.items && Array.isArray(prod.items)) {
+            for (const item of prod.items) {
+              if (item.itemId) skuIds.push(item.itemId);
+            }
+          }
+        }
+        if (skuIds.length === 0) continue;
+
+        const simItems = skuIds.slice(0, 10).map(id => ({ id, quantity: 1, seller: "1" }));
+        const simBody = JSON.stringify({ items: simItems, sc: scSource.salesChannel, country: "ARG", postalCode: scSource.postalCode || undefined });
+
+        try {
+          const simUrl = scSource.apiUrl ? new URL(scSource.apiUrl).origin + "/api/checkout/pub/orderForms/simulation" : "";
+          if (!simUrl) continue;
+
+          console.log(`[${scSource.name}] Simulating ${simItems.length} items sc=${scSource.salesChannel}...`);
+          const simResponse = await fetchWithFallback(simUrl, scSource.name + "_sim", { method: "POST", headers: { "Content-Type": "application/json" }, body: simBody }, true);
+
+          if (simResponse && simResponse.ok) {
+            const simResult = await simResponse.json();
+            const simItemsArr = simResult.items || [];
+            const priceMap = new Map<string, number>();
+            const listPriceMap = new Map<string, number>();
+            for (const si of simItemsArr) {
+              if (si.id && si.price != null) {
+                priceMap.set(si.id, si.price / 100);
+                if (si.listPrice != null) listPriceMap.set(si.id, si.listPrice / 100);
+              }
+            }
+
+            if (priceMap.size > 0) {
+              for (const prod of match.rawData) {
+                if (prod.items && Array.isArray(prod.items)) {
+                  for (const item of prod.items) {
+                    const simPrice = priceMap.get(item.itemId);
+                    if (simPrice != null && item.sellers && item.sellers[0]?.commertialOffer) {
+                      item.sellers[0].commertialOffer.Price = simPrice;
+                      if (listPriceMap.has(item.itemId)) {
+                        item.sellers[0].commertialOffer.ListPrice = listPriceMap.get(item.itemId);
+                      }
+                    }
+                  }
+                }
+              }
+              console.log(`[${scSource.name}] Applied ${priceMap.size} simulated prices`);
+            }
+          }
+        } catch (simErr: any) {
+          console.warn(`[${scSource.name}] Simulation failed:`, simErr.message);
+        }
       }
     }
 
@@ -1231,7 +1299,7 @@ export default function App() {
     } finally {
       setIsSearchingOnline(false);
     }
-  };
+  }, [catalogSources, apiKey, triggerError, triggerSuccess, setIsSearchingOnline, setOnlineSearchQuery, setOnlineSearchResults]);
 
   // Seed realistic grocery catalog brochures history to test Price History right away!
   const loadDemoData = () => {
@@ -1739,7 +1807,7 @@ export default function App() {
   }, [products]);
 
   // Handle Manual addition of product to catalog
-  const addManualProduct = (e: React.FormEvent) => {
+  const addManualProduct = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     if (!customItemName.trim()) return;
 
@@ -1773,10 +1841,10 @@ export default function App() {
     setCustomItemUnit("unit");
 
     triggerSuccess(`Successfully added manual catalog reference.`);
-  };
+  }, [customItemName, customItemPrice, customItemAmount, customItemUnit, customItemCategory, customItemSupermarket, setProducts, triggerSuccess]);
 
   // Remove individual catalog product
-  const deleteProduct = (id: string) => {
+  const deleteProduct = useCallback((id: string) => {
     if (confirm("Are you sure you want to delete this listing from database?")) {
       db.deleteProduct(id);
       setProducts(db.getProducts());
@@ -1785,10 +1853,10 @@ export default function App() {
       }
       triggerSuccess("Product deleted.");
     }
-  };
+  }, [selectedCompareProduct, setProducts, setSelectedCompareProduct, triggerSuccess]);
 
   // Add Item to Shopping List
-  const addToShoppingList = (product: Product) => {
+  const addToShoppingList = useCallback((product: Product) => {
     const existing = shoppingList.find(item => item.productId === product.id);
     if (existing) {
       const updatedItem = { ...existing, quantity: existing.quantity + 1 };
@@ -1812,10 +1880,10 @@ export default function App() {
     }
     setShoppingList(db.getShoppingList());
     triggerSuccess(`Added ${product.name} to shopping list.`);
-  };
+  }, [shoppingList, setShoppingList, triggerSuccess]);
 
   // Modify quantities on active shopping list
-  const updateListItemQuantity = (id: string, qty: number) => {
+  const updateListItemQuantity = useCallback((id: string, qty: number) => {
     const item = shoppingList.find(l => l.id === id);
     if (!item) return;
 
@@ -1825,108 +1893,29 @@ export default function App() {
       db.saveShoppingListItem({ ...item, quantity: qty });
     }
     setShoppingList(db.getShoppingList());
-  };
+  }, [shoppingList, setShoppingList]);
 
-  const toggleListItemChecked = (id: string) => {
+  const toggleListItemChecked = useCallback((id: string) => {
     const item = shoppingList.find(l => l.id === id);
     if (!item) return;
     db.saveShoppingListItem({ ...item, checked: !item.checked });
     setShoppingList(db.getShoppingList());
-  };
+  }, [shoppingList, setShoppingList]);
 
-  const deleteListItem = (id: string) => {
+  const deleteListItem = useCallback((id: string) => {
     db.deleteShoppingListItem(id);
     setShoppingList(db.getShoppingList());
-  };
+  }, [setShoppingList]);
 
-  const clearList = () => {
+  const clearList = useCallback(() => {
     if (confirm("Clear your entire shopping list?")) {
       db.clearShoppingList();
       setShoppingList([]);
     }
-  };
+  }, [setShoppingList]);
 
-  // Master catalog filtration and sort application
-  const filteredProducts = useMemo(() => {
-    // We only want the LATEST listing per product per supermarket for general catalog view,
-    // to map distinct products.
-    const latestItemsMap: { [key: string]: Product } = {};
-    
-    products.forEach(p => {
-      // create a composite key to group by name and supermarket
-      const key = `${p.name.toLowerCase().trim()}_${p.supermarket.toLowerCase().trim()}`;
-      const existing = latestItemsMap[key];
-      if (!existing || new Date(p.dateExtracted) > new Date(existing.dateExtracted)) {
-        latestItemsMap[key] = p;
-      }
-    });
-
-    let list = Object.values(latestItemsMap);
-
-    // Apply text search
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      list = list.filter(p => 
-        p.name.toLowerCase().includes(q) || 
-        p.category.toLowerCase().includes(q) ||
-        p.supermarket.toLowerCase().includes(q)
-      );
-    }
-
-    // Apply categories
-    if (categoryFilter !== "All") {
-      list = list.filter(p => p.category === categoryFilter);
-    }
-
-    // Apply supermarket filters
-    if (supermarketFilter !== "All") {
-      list = list.filter(p => p.supermarket === supermarketFilter);
-    }
-
-    // Apply Sorts
-    list.sort((a, b) => {
-      if (sortBy === "name") {
-        return a.name.localeCompare(b.name);
-      }
-      if (sortBy === "price_asc") {
-        return a.salePrice - b.salePrice;
-      }
-      if (sortBy === "price_desc") {
-        return b.salePrice - a.salePrice;
-      }
-      if (sortBy === "unitprice_asc") {
-        return a.unitPrice - b.unitPrice;
-      }
-      return 0;
-    });
-
-    return list;
-  }, [products, searchQuery, categoryFilter, supermarketFilter, sortBy]);
-
-  // Aggregate Price History for a specific product
-  const productPriceHistory = useMemo(() => {
-    if (!selectedCompareProduct) return [];
-
-    const pName = selectedCompareProduct.name.toLowerCase().trim();
-    
-    // Find all records with this exact/similar name
-    const matches = products.filter(p => p.name.toLowerCase().trim() === pName);
-
-    // Group by date and sort safely
-    return matches.map(m => ({
-      date: new Date(m.dateExtracted).toLocaleDateString(undefined, {month: 'short', day: 'numeric'}),
-      timestamp: new Date(m.dateExtracted).getTime(),
-      price: m.salePrice,
-      unitPrice: m.unitPrice,
-      supermarket: m.supermarket,
-    })).sort((a, b) => a.timestamp - b.timestamp);
-  }, [selectedCompareProduct, products]);
-
-  // Online store catalog comparisons for the currently selected detail item
-  const catalogComparisons = useMemo(() => {
-    if (!selectedCompareProduct) return [];
-    return findSimilarOnlineProducts(selectedCompareProduct.name, selectedCompareProduct.category);
-  }, [selectedCompareProduct]);
+  // Keep uniqueSupermarkets here since it is also used by shoppingOptimization
+  // filteredProducts, productPriceHistory, catalogComparisons moved to CatalogTab
 
   // Global shopping budget optimizer calculations
   const shoppingOptimization = useMemo(() => {
@@ -2047,7 +2036,7 @@ export default function App() {
   }, [shoppingList, products, uniqueSupermarkets]);
 
   // Export handling
-  const handleExportCSV = () => {
+  const handleExportCSV = useCallback(() => {
     if (products.length === 0) {
       triggerError("No data available to export. Standardize some brochures first.");
       return;
@@ -2062,7 +2051,7 @@ export default function App() {
     link.click();
     document.body.removeChild(link);
     triggerSuccess("CSV catalog exported. You can import this directly into Google Sheets!");
-  };
+  }, [products, triggerError, triggerSuccess]);
 
   // Custom Supermarket Search Engines Actions
   const handleSaveCatalogSource = (source: CatalogSource) => {
@@ -2112,7 +2101,57 @@ export default function App() {
     }
   };
 
-  const handleAddApiProductToCatalog = (item: ApiProductResult) => {
+  const handleLoginCatalogSource = async (source: CatalogSource, formData: Record<string, string>, captchaToken?: string) => {
+    if (!source.sessionLoginUrl || !source.sessionLoginFields) {
+      triggerError("El catálogo no tiene configuración de login completa.");
+      return;
+    }
+    const gsheetsUrl = localStorage.getItem("bp_gsheets_url") || "";
+    if (!gsheetsUrl) {
+      triggerError("El proxy GAS no está configurado. Configure la URL de GSheets primero.");
+      return;
+    }
+    try {
+      const loginPayload: Record<string, string> = {};
+      for (const key of Object.keys(source.sessionLoginFields)) {
+        const tmpl = source.sessionLoginFields[key];
+        loginPayload[key] = tmpl.replace(/{(\w+)}/g, (_, name) => formData[name] || "");
+      }
+      const body = JSON.stringify({ action: "proxyLogin", loginUrl: source.sessionLoginUrl, loginPayload, captchaToken: captchaToken || null });
+      const res = await fetch(gsheetsUrl, { method: "POST", mode: "cors", headers: { "Content-Type": "text/plain" }, body });
+      const json = await res.json();
+      if (json.status === "success" && json.sessionId) {
+        const updated: CatalogSource = { ...source, sessionId: json.sessionId, sessionExpiresAt: undefined };
+        db.saveCatalogSource(updated);
+        setCatalogSources(db.getCatalogSources());
+        setEditingCatalogSource(updated);
+        triggerSuccess(`Sesión iniciada para "${source.name}".`);
+      } else {
+        triggerError(`Error al iniciar sesión: ${json.message || "Respuesta inesperada"}`);
+      }
+    } catch (err: any) {
+      console.error("Login error:", err);
+      triggerError(`Error de conexión al iniciar sesión: ${err.message}`);
+    }
+  };
+
+  const handleLogoutCatalogSource = async (source: CatalogSource) => {
+    if (!source.sessionId) return;
+    const gsheetsUrl = localStorage.getItem("bp_gsheets_url") || "";
+    if (gsheetsUrl) {
+      try {
+        const body = JSON.stringify({ action: "proxyLogout", sessionId: source.sessionId });
+        await fetch(gsheetsUrl, { method: "POST", mode: "cors", headers: { "Content-Type": "text/plain" }, body });
+      } catch {}
+    }
+    const updated: CatalogSource = { ...source, sessionId: undefined, sessionExpiresAt: undefined };
+    db.saveCatalogSource(updated);
+    setCatalogSources(db.getCatalogSources());
+    setEditingCatalogSource(updated);
+    triggerSuccess(`Sesión cerrada para "${source.name}".`);
+  };
+
+  const handleAddApiProductToCatalog = useCallback((item: ApiProductResult) => {
     const norm = getUnitNormalization(item.amount, item.unit);
     const newProduct: Product = {
       id: `api-prod-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -2132,9 +2171,9 @@ export default function App() {
     db.saveProduct(newProduct);
     setProducts(db.getProducts());
     triggerSuccess(`"${newProduct.name}" agregado al catálogo.`);
-  };
+  }, [setProducts, triggerSuccess]);
 
-  const handleAddAllApiProductsToCatalog = () => {
+  const handleAddAllApiProductsToCatalog = useCallback(() => {
     let count = 0;
     onlineSearchResults.forEach(item => {
       const norm = getUnitNormalization(item.amount, item.unit);
@@ -2159,7 +2198,7 @@ export default function App() {
     setProducts(db.getProducts());
     setOnlineSearchResults([]);
     triggerSuccess(`${count} productos agregados al catálogo.`);
-  };
+  }, [onlineSearchResults, setOnlineSearchResults, setProducts, triggerSuccess]);
 
   // Store analysis wizard handlers
   const handleAcceptWizardAnalysis = (analysis: StoreAnalysisResult) => {
@@ -2861,1141 +2900,76 @@ export default function App() {
              </motion.div>
            )}
  
-           {/* TAB 1: CATALOG OF PRODUCTS */}
-           {activeTab === "catalog" && (
-             <motion.div
-               key="catalog-tab"
-               initial={{ opacity: 0, y: 10 }}
-               animate={{ opacity: 1, y: 0 }}
-               exit={{ opacity: 0, y: -10 }}
-               transition={{ duration: 0.15 }}
-             >
-               
-               {/* Warnings / Onboarding callout when empty */}
-               {products.length === 0 && (
-                 <div className="bg-gradient-to-r from-sky-50 to-indigo-50 border border-sky-100 rounded-2xl p-6 md:p-8 text-center max-w-2xl mx-auto my-8">
-                   <Store className="w-12 h-12 text-sky-500 mx-auto mb-4" />
-                   <h3 className="text-lg font-bold text-slate-800">Tu base de datos de comparación de productos está vacía</h3>
-                   <p className="text-sm text-slate-600 mt-2 max-w-md mx-auto">
-                     Para comenzar a ahorrar, puedes subir folletos de supermercados en formato PDF, escanear o cargar un ticket de compra con la cámara inteligente, o sincronizar tus datos desde Google Sheets.
-                   </p>
-                   <div className="mt-6 flex flex-wrap justify-center gap-3">
-                     <button
-                       onClick={() => setActiveTab("upload")}
-                       className="bg-sky-600 hover:bg-sky-700 text-white font-semibold px-4 py-2.5 rounded-xl shadow-md transition active:scale-95 text-sm flex items-center gap-2"
-                     >
-                       <Upload className="w-4 h-4" />
-                       Subir Folleto PDF
-                     </button>
-                     <button
-                       onClick={() => setActiveTab("scan")}
-                       className="bg-white hover:bg-slate-50 text-slate-800 font-semibold px-4 py-2.5 rounded-xl border border-slate-200 shadow-sm transition active:scale-95 text-sm flex items-center gap-2"
-                     >
-                       📸 Escanear Ticket / Etiqueta
-                     </button>
-                   </div>
-                 </div>
-               )}
-
-              {products.length > 0 && (
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                  
-                  {/* Left Column: Filters and List browser */}
-                  <div className="lg:col-span-8 flex flex-col gap-4">
-                    
-                    {/* Filter bar */}
-                    <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex flex-col gap-3">
-                      
-                      {/* Search */}
-                      <div className="relative">
-                        <Search className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
-                        <DebouncedInput
-                          type="text"
-                          placeholder="Buscar productos, marcas, categorías..."
-                          value={searchQuery}
-                          onChange={setSearchQuery}
-                          className="w-full pl-9 pr-4 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:border-sky-500 focus:outline-none"
-                        />
-                      </div>
-
-                      {/* Dropdowns */}
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
-                        <div>
-                          <label className="block text-slate-500 font-medium mb-1">Categoría de Rubro</label>
-                          <select
-                            value={categoryFilter}
-                            onChange={(e) => setCategoryFilter(e.target.value)}
-                            className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
-                          >
-                            <option value="All">Todos los rubros</option>
-                            <option value="Produce">Verdulería y Frutas 🍏</option>
-                            <option value="Meat">Carnes y Pescados 🥩</option>
-                            <option value="Dairy">Lácteos y Huevos 🥛</option>
-                            <option value="Bakery">Panadería 🍞</option>
-                            <option value="Pantry">Almacén y Comestibles 🍝</option>
-                            <option value="Beverages">Bebidas 🥤</option>
-                            <option value="Household">Limpieza y Hogar 🧼</option>
-                            <option value="Other">Otros 📦</option>
-                          </select>
-                        </div>
-
-                        <div>
-                          <label className="block text-slate-500 font-medium mb-1">Supermercado</label>
-                          <select
-                            value={supermarketFilter}
-                            onChange={(e) => setSupermarketFilter(e.target.value)}
-                            className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
-                          >
-                            <option value="All">Todos los supermercados</option>
-                            {uniqueSupermarkets.map((m) => (
-                              <option key={m} value={m}>{m}</option>
-                            ))}
-                          </select>
-                        </div>
-
-                        <div>
-                          <label className="block text-slate-500 font-medium mb-1">Ordenar catálogo por</label>
-                          <select
-                            value={sortBy}
-                            onChange={(e) => setSortBy(e.target.value as any)}
-                            className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
-                          >
-                            <option value="name">Nombre del producto (A-Z)</option>
-                            <option value="price_asc">Precio: Menor a Mayor</option>
-                            <option value="price_desc">Precio: Mayor a Menor</option>
-                            <option value="unitprice_asc">Valor Unitario: Mejor relación</option>
-                          </select>
-                        </div>
-                      </div>
-
-                    </div>
-
-                    {/* Online Search Panel (API + Scrape) */}
-                    <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex flex-col gap-3">
-                      <div className="flex items-center justify-between">
-                        <h4 className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                          <Globe className="w-4 h-4 text-emerald-500" />
-                          Búsqueda Online (API + Web)
-                        </h4>
-                        {onlineSearchResults.length > 0 && (
-                          <button onClick={() => { setOnlineSearchResults([]); setOnlineSearchQuery(""); }}
-                            className="text-[10px] text-slate-400 hover:text-slate-600">
-                            Limpiar resultados
-                          </button>
-                        )}
-                      </div>
-                      <div className="flex gap-2">
-                        <DebouncedInput type="text" placeholder="Ej: arroz, leche, huevos..."
-                          value={onlineSearchQuery}
-                          onChange={setOnlineSearchQuery}
-                          onEnter={(val) => executeOnlineSearch(val)}
-                          className="flex-1 px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:border-emerald-500 focus:outline-none" />
-                        <button onClick={() => executeOnlineSearch(onlineSearchQuery)}
-                          disabled={isSearchingOnline}
-                          className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-4 py-2 rounded-xl text-xs transition flex items-center gap-1.5 active:scale-95 shadow">
-                          {isSearchingOnline ? (
-                            <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Buscando...</>
-                          ) : (
-                            <><Search className="w-3.5 h-3.5" /> Buscar Online</>
-                          )}
-                        </button>
-                      </div>
-
-                      {/* Online Search Results Table */}
-                      {onlineSearchResults.length > 0 && (
-                        <div className="overflow-x-auto">
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-xs font-bold text-slate-600">
-                              Resultados para "{onlineSearchQuery}" ({onlineSearchResults.length} productos)
-                            </span>
-                            <button onClick={handleAddAllApiProductsToCatalog}
-                              className="bg-sky-600 hover:bg-sky-700 text-white font-semibold px-3 py-1.5 rounded-lg text-[10px] transition flex items-center gap-1 active:scale-95 shadow">
-                              <Plus className="w-3 h-3" />
-                              Agregar Todos al Catálogo
-                            </button>
-                          </div>
-                          <table className="w-full text-xs border-collapse">
-                            <thead>
-                              <tr className="bg-slate-50 border-b border-slate-200">
-                                <th className="text-left p-2 font-bold text-slate-600 whitespace-nowrap">Tienda</th>
-                                <th className="text-left p-2 font-bold text-slate-600 whitespace-nowrap">Marca</th>
-                                <th className="text-left p-2 font-bold text-slate-600 whitespace-nowrap">Producto</th>
-                                <th className="text-left p-2 font-bold text-slate-600 whitespace-nowrap">Presentación</th>
-                                <th className="text-right p-2 font-bold text-slate-600 whitespace-nowrap">Precio</th>
-                                <th className="text-right p-2 font-bold text-slate-600 whitespace-nowrap">Precio x Unidad</th>
-                                <th className="text-left p-2 font-bold text-slate-600 whitespace-nowrap">Ofertas</th>
-                                <th className="text-center p-2 font-bold text-slate-600 whitespace-nowrap">Agregar</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {onlineSearchResults.map((item, idx) => (
-                                <tr key={idx} className="border-b border-slate-100 hover:bg-slate-50/50">
-                                  <td className="p-2 text-slate-700 font-medium">{item.shop}</td>
-                                  <td className="p-2 text-slate-600">{item.brand || "-"}</td>
-                                  <td className="p-2 text-slate-800 font-semibold">{item.productName}</td>
-                                  <td className="p-2 text-slate-600 whitespace-nowrap">{item.presentation}</td>
-                                  <td className="p-2 text-right text-slate-800 font-bold whitespace-nowrap">${item.price.toFixed(2)}</td>
-                                  <td className="p-2 text-right text-slate-500 font-mono whitespace-nowrap">{formatUnitPrice(item.unitPrice, item.baseUnit)}</td>
-                                  <td className="p-2 text-emerald-600 text-[10px] max-w-[120px] truncate">{item.discountsAndDeals || "-"}</td>
-                                  <td className="p-2 text-center">
-                                    <button onClick={() => handleAddApiProductToCatalog(item)}
-                                      className="text-sky-600 hover:text-sky-700 bg-sky-50 hover:bg-sky-100 p-1.5 rounded-lg transition active:scale-95"
-                                      title="Agregar al catálogo">
-                                      <Plus className="w-3.5 h-3.5" />
-                                    </button>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Master Results List (Unique Items) */}
-                    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
-                      <div className="p-4 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
-                        <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Catalog Matches ({filteredProducts.length})</span>
-                        <span className="text-xs bg-slate-200 text-slate-700 px-2 py-0.5 rounded-full font-semibold">Latest Leaflet Pricing</span>
-                      </div>
-
-                      <div className="divide-y divide-slate-100 max-h-[60vh] overflow-y-auto">
-                        {filteredProducts.map((product) => {
-                          const isSelected = selectedCompareProduct?.id === product.id;
-                          return (
-                            <div 
-                              key={product.id}
-                              onClick={() => setSelectedCompareProduct(product)}
-                              className={`p-4 flex items-center justify-between gap-4 cursor-pointer transition ${
-                                isSelected ? "bg-sky-50/70 shadow-inner" : "hover:bg-slate-50/50"
-                              }`}
-                            >
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-medium text-sky-600 bg-sky-50 px-2 py-0.5 rounded-full">
-                                    {translateCategory(product.category)}
-                                  </span>
-                                  <span className="text-[10px] text-slate-400 font-mono">
-                                    {new Date(product.dateExtracted).toLocaleDateString()}
-                                  </span>
-                                </div>
-                                <h4 className="text-sm font-semibold text-slate-800 mt-1 truncate">{product.name}</h4>
-                                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-xs text-slate-500">
-                                  <span className="flex items-center gap-1 font-medium text-slate-700">
-                                    <Store className="w-3.5 h-3.5 text-slate-400" />
-                                    {product.supermarket}
-                                  </span>
-                                  <span>•</span>
-                                  <span>Tamaño: {product.amount} {product.unit}</span>
-                                </div>
-                              </div>
-
-                              <div className="text-right shrink-0 flex items-center gap-3">
-                                <div>
-                                  <div className="text-base font-bold text-slate-900">
-                                    ${product.salePrice.toFixed(2)}
-                                  </div>
-                                  {product.originalPrice > product.salePrice && (
-                                    <div className="text-[10px] text-rose-500 line-through">
-                                      ${product.originalPrice.toFixed(2)}
-                                    </div>
-                                  )}
-                                  <div className="text-[10px] text-slate-400 mt-0.5 font-mono">
-                                    {formatUnitPrice(product.unitPrice, product.baseUnit)}
-                                  </div>
-                                </div>
-
-                                <div className="flex flex-col gap-1.5 justify-center">
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      addToShoppingList(product);
-                                    }}
-                                    className="p-1.5 bg-slate-900 hover:bg-sky-600 hover:text-white text-slate-200 rounded-lg transition active:scale-95"
-                                    title="Add to Shopping List"
-                                  >
-                                    <Plus className="w-4 h-4" />
-                                  </button>
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      deleteProduct(product.id);
-                                    }}
-                                    className="p-1.5 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition"
-                                    title="Delete product match"
-                                  >
-                                    <Trash className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-
-                        {filteredProducts.length === 0 && (
-                          <div className="p-8 text-center text-slate-400">
-                            No products match your filters. Try modifying terms.
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Manual product injector form */}
-                    <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
-                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Add Custom Direct Reference Price</h4>
-                      <form onSubmit={addManualProduct} className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
-                        <div className="col-span-2 sm:col-span-1 md:col-span-2">
-                          <DebouncedInput
-                            type="text"
-                            placeholder="Product Name"
-                            value={customItemName}
-                            onChange={setCustomItemName}
-                            className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
-                            required
-                          />
-                        </div>
-                        <div>
-                          <select
-                            value={customItemCategory}
-                            onChange={(e) => setCustomItemCategory(e.target.value)}
-                            className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
-                          >
-                            <option value="Produce">Produce</option>
-                            <option value="Meat">Meat</option>
-                            <option value="Dairy">Dairy</option>
-                            <option value="Bakery">Bakery</option>
-                            <option value="Pantry">Pantry</option>
-                            <option value="Beverages">Beverages</option>
-                            <option value="Household">Household</option>
-                            <option value="Other">Other</option>
-                          </select>
-                        </div>
-                        <div>
-                          <DebouncedInput
-                            type="text"
-                            placeholder="Price ($)"
-                            value={customItemPrice}
-                            onChange={setCustomItemPrice}
-                            className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
-                            required
-                          />
-                        </div>
-                        <div className="grid grid-cols-2 gap-1">
-                          <DebouncedInput
-                            type="number"
-                            placeholder="Qty"
-                            value={customItemAmount}
-                            onChange={setCustomItemAmount}
-                            className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
-                            required
-                          />
-                          <DebouncedInput
-                            type="text"
-                            placeholder="Unit"
-                            value={customItemUnit}
-                            onChange={setCustomItemUnit}
-                            className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none"
-                            required
-                          />
-                        </div>
-                        <div>
-                          <DebouncedInput
-                            type="text"
-                            placeholder="Store Name"
-                            value={customItemSupermarket}
-                            onChange={setCustomItemSupermarket}
-                            className="w-full p-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:border-sky-500 focus:outline-none animate-pulse"
-                          />
-                        </div>
-                        <button
-                          type="submit"
-                          className="w-full bg-slate-800 hover:bg-slate-900 text-white font-semibold text-xs py-2 rounded-lg transition active:scale-95"
-                        >
-                          Add Product
-                        </button>
-                      </form>
-                    </div>
-
-                  </div>
-
-                  {/* Right Column: Dynamic Price history analytics of selectedCompareProduct */}
-                  <div className="lg:col-span-4 sticky top-28 flex flex-col gap-4">
-                    
-                    {selectedCompareProduct ? (
-                      <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col">
-                        
-                        <div className="flex justify-between items-start gap-2 mb-3">
-                          <div>
-                            <span className="text-[10px] text-sky-600 font-bold bg-sky-50 px-2 py-0.5 rounded-full uppercase tracking-wide">
-                              {translateCategory(selectedCompareProduct.category)}
-                            </span>
-                            <h3 className="text-base font-bold text-slate-800 mt-1">{selectedCompareProduct.name}</h3>
-                          </div>
-                          <button 
-                            onClick={() => setSelectedCompareProduct(null)}
-                            className="text-slate-300 hover:text-slate-500 text-xs font-semibold"
-                          >
-                            Cerrar
-                          </button>
-                        </div>
-
-                        {/* Current metrics */}
-                        <div className="grid grid-cols-2 gap-2 bg-slate-50 p-3 rounded-xl mb-4 text-xs">
-                          <div>
-                            <p className="text-slate-400">Current Price</p>
-                            <p className="text-base font-bold text-slate-800 mt-0.5">
-                              ${selectedCompareProduct.salePrice.toFixed(2)}
-                            </p>
-                            <p className="text-[10px] text-slate-400">({selectedCompareProduct.amount} {selectedCompareProduct.unit})</p>
-                          </div>
-                          <div>
-                            <p className="text-slate-400">Unit Price Value</p>
-                            <p className="text-base font-bold text-slate-800 mt-0.5 font-mono text-sky-600">
-                              {formatUnitPrice(selectedCompareProduct.unitPrice, selectedCompareProduct.baseUnit)}
-                            </p>
-                            <p className="text-[10px] text-slate-400">Base: {selectedCompareProduct.baseUnit}</p>
-                          </div>
-                        </div>
-
-                        {/* Price Comparison Graph (Custom SVGs) */}
-                        <div className="mb-4">
-                          <div className="flex justify-between items-center mb-1">
-                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-                              <TrendingUp className="w-3.5 h-3.5 text-sky-500" />
-                              Price History Trend
-                            </h4>
-                            <span className="text-[10px] text-slate-400">Extracted brochures</span>
-                          </div>
-
-                          {productPriceHistory.length > 1 ? (
-                            <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 h-44 flex flex-col justify-between relative shadow-inner">
-                              
-                              {/* Draw SVG Graph */}
-                              <svg className="w-full h-full pt-4 pb-6 px-4" viewBox="0 0 200 100" preserveAspectRatio="none">
-                                {/* Grid-lines */}
-                                <line x1="0" y1="20" x2="200" y2="20" stroke="#1e293b" strokeDasharray="3,3" strokeWidth="0.5" />
-                                <line x1="0" y1="50" x2="200" y2="50" stroke="#1e293b" strokeDasharray="3,3" strokeWidth="0.5" />
-                                <line x1="0" y1="80" x2="200" y2="80" stroke="#1e293b" strokeDasharray="3,3" strokeWidth="0.5" />
-
-                                {(() => {
-                                  // Map rates to relative coordinates (0 to 100)
-                                  const prices = productPriceHistory.map(h => h.price);
-                                  const minP = Math.min(...prices) * 0.9;
-                                  const maxP = Math.max(...prices) * 1.1;
-                                  const range = maxP - minP || 1;
-
-                                  const points = productPriceHistory.map((h, i) => {
-                                    const x = (i / (productPriceHistory.length - 1)) * 200;
-                                    // Invert Y axes so higher prices load at top
-                                    const y = 90 - ((h.price - minP) / range) * 80;
-                                    return { x, y, info: h };
-                                  });
-
-                                  // Join lines
-                                  const d = points.reduce((path, p, i) => i === 0 ? `M ${p.x} ${p.y}` : `${path} L ${p.x} ${p.y}`, "");
-
-                                  return (
-                                    <>
-                                      {/* Gradient Area Fill under Graph */}
-                                      <path
-                                        d={`${d} L ${points[points.length-1].x} 90 L ${points[0].x} 90 Z`}
-                                        fill="url(#trendGrad)"
-                                        opacity="0.15"
-                                      />
-                                      <defs>
-                                        <linearGradient id="trendGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-                                          <stop offset="0%" stopColor="#38bdf8" />
-                                          <stop offset="100%" stopColor="#38bdf8" stopOpacity="0" />
-                                        </linearGradient>
-                                      </defs>
-
-                                      {/* Main Trend Line path */}
-                                      <path d={d} fill="none" stroke="#38bdf8" strokeWidth="1.5" strokeLinecap="round" />
-
-                                      {/* Dot points */}
-                                      {points.map((p, idx) => (
-                                        <g key={idx}>
-                                          <circle cx={p.x} cy={p.y} r="2.5" fill="#0f172a" stroke="#38bdf8" strokeWidth="1.5" />
-                                          <text 
-                                            x={p.x} 
-                                            y={p.y - 6} 
-                                            fill="#94a3b8" 
-                                            fontSize="5" 
-                                            textAnchor="middle"
-                                            fontFamily="monospace"
-                                          >
-                                            ${p.info.price.toFixed(2)}
-                                          </text>
-                                        </g>
-                                      ))}
-                                    </>
-                                  );
-                                })()}
-                              </svg>
-
-                              {/* Axes date tags at bottom */}
-                              <div className="absolute bottom-1 left-3 right-3 flex justify-between text-[8px] text-slate-500 font-mono">
-                                <span>{productPriceHistory[0].date}</span>
-                                {productPriceHistory.length > 2 && (
-                                  <span>{productPriceHistory[Math.floor(productPriceHistory.length / 2)].date}</span>
-                                )}
-                                <span>{productPriceHistory[productPriceHistory.length - 1].date}</span>
-                              </div>
-
-                            </div>
-                          ) : (
-                            <div className="bg-slate-50 rounded-xl p-6 text-center text-xs text-slate-400">
-                              Requires at least 2 historical scanner listings to plot a price trajectory.
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Online Catalog lookups & price comparison comparison */}
-                        <div className="flex-1 mt-2">
-                          <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-                            <Globe className="w-3.5 h-3.5 text-zinc-400" />
-                            Digital Catalog Comparison
-                          </h4>
-
-                          <div className="flex flex-col gap-2 max-h-[22vh] overflow-y-auto">
-                            
-                            {/* Selected comparison supermarket first */}
-                            <div className="p-2.5 bg-sky-500/10 border border-sky-450 rounded-xl flex justify-between items-center text-xs">
-                              <div className="min-w-0">
-                                <p className="font-semibold text-slate-800 flex items-center gap-1">
-                                  <Store className="w-3 h-3 text-sky-600" />
-                                  {selectedCompareProduct.supermarket} (Current)
-                                </p>
-                                <p className="text-[10px] text-slate-400 truncate mt-0.5">{selectedCompareProduct.name}</p>
-                              </div>
-                              <div className="text-right shrink-0">
-                                <p className="font-bold text-slate-900">${selectedCompareProduct.salePrice.toFixed(2)}</p>
-                                <p className="text-[9px] text-sky-600 font-mono mt-0.5">
-                                  {formatUnitPrice(selectedCompareProduct.unitPrice, selectedCompareProduct.baseUnit)}
-                                </p>
-                              </div>
-                            </div>
-
-                            {/* Catalog matches */}
-                            {catalogComparisons.map((comp, idx) => {
-                              const isCheaper = comp.unitPrice < selectedCompareProduct.unitPrice;
-                              const diff = Math.abs(selectedCompareProduct.unitPrice - comp.unitPrice);
-                              return (
-                                <div key={idx} className="p-2.5 bg-slate-50 hover:bg-slate-100 border border-slate-200/55 rounded-xl flex justify-between items-center text-xs transition">
-                                  <div className="min-w-0">
-                                    <p className="font-semibold text-slate-700 flex items-center gap-1">
-                                      <Globe className="w-3 h-3 text-slate-400" />
-                                      {comp.storeName}
-                                    </p>
-                                    <p className="text-[10px] text-slate-400 truncate mt-0.5">{comp.productName}</p>
-                                  </div>
-                                  <div className="text-right shrink-0">
-                                    <p className="font-bold text-slate-800">${comp.price.toFixed(2)}</p>
-                                    <p className={`text-[9px] font-mono mt-0.5 ${isCheaper ? 'text-emerald-600 font-semibold' : 'text-slate-400'}`}>
-                                      {formatUnitPrice(comp.unitPrice, comp.baseUnit)}
-                                    </p>
-                                    {isCheaper && (
-                                      <span className="text-[8px] text-emerald-500 bg-emerald-50 px-1 rounded block mt-0.5">
-                                        Cheaper by ${diff.toFixed(2)}/{comp.baseUnit}
-                                      </span>
-                                    )}
-                                  </div>
-                                </div>
-                              );
-                            })}
-
-                            {catalogComparisons.length === 0 && (
-                              <div className="p-4 rounded-xl border border-dashed border-slate-200 text-center text-xs text-slate-400">
-                                No similar items found in digital catalog catalogs.
-                              </div>
-                            )}
-
-                          </div>
-                          
-                          <button
-                            onClick={() => addToShoppingList(selectedCompareProduct)}
-                            className="w-full mt-4 bg-sky-600 hover:bg-sky-700 text-white font-semibold py-2 rounded-xl text-xs transition active:scale-95 flex items-center justify-center gap-1.5"
-                          >
-                            <ShoppingCart className="w-3.5 h-3.5" />
-                            Add to Shopping List
-                          </button>
-
-                        </div>
-
-                      </div>
-                    ) : (
-                      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 text-center py-12 flex flex-col justify-center items-center">
-                        <Info className="w-8 h-8 text-slate-300 mb-3" />
-                        <h4 className="font-bold text-slate-700 text-sm">No Product Selected</h4>
-                        <p className="text-xs text-slate-400 mt-1.5 max-w-[200px]">
-                          Click any product listing on the left to show online price comparisons and price trends over time.
-                        </p>
-                      </div>
-                    )}
-
-                  </div>
-
-                </div>
-              )}
-
-            </motion.div>
-          )}
+            {/* TAB 1: CATALOG OF PRODUCTS */}
+            {activeTab === "catalog" && (
+              <CatalogTab
+                products={products}
+                searchQuery={searchQuery}
+                setSearchQuery={setSearchQuery}
+                categoryFilter={categoryFilter}
+                setCategoryFilter={setCategoryFilter}
+                supermarketFilter={supermarketFilter}
+                setSupermarketFilter={setSupermarketFilter}
+                sortBy={sortBy}
+                setSortBy={setSortBy}
+                uniqueSupermarkets={uniqueSupermarkets}
+                selectedCompareProduct={selectedCompareProduct}
+                setSelectedCompareProduct={setSelectedCompareProduct}
+                customItemName={customItemName}
+                setCustomItemName={setCustomItemName}
+                customItemCategory={customItemCategory}
+                setCustomItemCategory={setCustomItemCategory}
+                customItemPrice={customItemPrice}
+                setCustomItemPrice={setCustomItemPrice}
+                customItemAmount={customItemAmount}
+                setCustomItemAmount={setCustomItemAmount}
+                customItemUnit={customItemUnit}
+                setCustomItemUnit={setCustomItemUnit}
+                customItemSupermarket={customItemSupermarket}
+                setCustomItemSupermarket={setCustomItemSupermarket}
+                onlineSearchResults={onlineSearchResults}
+                onlineSearchQuery={onlineSearchQuery}
+                setOnlineSearchQuery={setOnlineSearchQuery}
+                isSearchingOnline={isSearchingOnline}
+                executeOnlineSearch={executeOnlineSearch}
+                addManualProduct={addManualProduct}
+                deleteProduct={deleteProduct}
+                addToShoppingList={addToShoppingList}
+                handleAddApiProductToCatalog={handleAddApiProductToCatalog}
+                handleAddAllApiProductsToCatalog={handleAddAllApiProductsToCatalog}
+                setActiveTab={setActiveTab}
+              />
+            )}
 
           {/* TAB: CAMERA SCAN PRICE TAG */}
           {activeTab === "scan" && (
-            <motion.div
-              key="scan-tab"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="max-w-4xl mx-auto flex flex-col gap-6"
-            >
-              <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
-                <div className="flex items-center gap-3 mb-2">
-                  <div className="p-2 bg-emerald-500/10 text-emerald-600 rounded-xl">
-                    <Camera className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h2 className="text-xl font-bold text-slate-800">Escáner de Góndola y Comparador de Precios</h2>
-                    <p className="text-xs text-slate-500">Apunte su cámara a una etiqueta de precio en góndola o suba una foto para comparar al instante.</p>
-                  </div>
-                </div>
-
-                {!apiKey && (
-                  <div className="mt-4 p-4 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 flex items-start gap-3">
-                    <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="text-sm font-semibold">Se requiere Clave API de Gemini</p>
-                      <p className="text-xs text-amber-700 mt-1">
-                        Para analizar etiquetas de precio en tiempo real con Inteligencia Artificial, necesita configurar una API Key de Gemini en Ajustes.
-                      </p>
-                      <button
-                        onClick={() => setActiveTab("settings")}
-                        className="mt-2.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition"
-                      >
-                        Ingresar API Key Ahora
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {apiKey && (
-                  <div className="mt-6 grid grid-cols-1 md:grid-cols-12 gap-6">
-                    
-                    {/* Panel Izquierdo: Cámara o Imagen subida */}
-                    <div className="md:col-span-6 flex flex-col gap-3">
-                      <div className="relative bg-slate-900 rounded-2xl aspect-[4/3] overflow-hidden flex flex-col items-center justify-center border border-slate-800 shadow-inner group">
-                        
-                        {/* Video en vivo */}
-                        {isCameraActive && (
-                          <video
-                            ref={videoRef}
-                            autoPlay
-                            playsInline
-                            className="w-full h-full object-cover"
-                          />
-                        )}
-
-                        {/* Efecto de láser escáner */}
-                        {isCameraActive && !scanCapturedImage && (
-                          <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center">
-                            <div className="w-full h-0.5 bg-emerald-400 absolute top-1/4 animate-[bounce_3s_infinite] shadow-[0_0_12px_rgba(52,211,153,0.8)]" />
-                            
-                            <div className="border-2 border-dashed border-emerald-400/60 w-3/4 h-1/2 rounded-lg flex items-center justify-center relative">
-                              <span className="text-[10px] text-emerald-300 font-mono tracking-wider bg-slate-900/80 px-2 py-0.5 rounded uppercase">Alinee el precio aquí</span>
-                              <div className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-emerald-400 -mt-0.5 -ml-0.5" />
-                              <div className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-emerald-400 -mt-0.5 -mr-0.5" />
-                              <div className="absolute bottom-0 left-0 w-4 h-4 border-b-2 border-l-2 border-emerald-400 -mb-0.5 -ml-0.5" />
-                              <div className="absolute bottom-0 right-0 w-4 h-4 border-b-2 border-r-2 border-emerald-400 -mb-0.5 -mr-0.5" />
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Foto fija capturada o subida */}
-                        {scanCapturedImage && (
-                          <img
-                            src={scanCapturedImage}
-                            alt="Etiqueta capturada"
-                            className="w-full h-full object-cover"
-                            referrerPolicy="no-referrer"
-                          />
-                        )}
-
-                        {/* Estado: Cámara apagada */}
-                        {!isCameraActive && !scanCapturedImage && !isCurrentlyScanning && (
-                          <div className="text-center p-6 flex flex-col items-center">
-                            <div className="p-4 bg-slate-800 text-slate-400 rounded-full mb-3">
-                              <Camera className="w-8 h-8" />
-                            </div>
-                            <span className="text-sm font-semibold text-slate-300">Cámara Apagada</span>
-                            <span className="text-xs text-slate-500 max-w-xs mt-1">Lista para usarse en su celular o computadora</span>
-                          </div>
-                        )}
-
-                        {/* Analizando con Gemini */}
-                        {isCurrentlyScanning && (
-                          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center text-center p-4">
-                            <RefreshCw className="w-10 h-10 text-emerald-400 animate-spin mb-3" />
-                            <h4 className="text-sm font-bold text-white tracking-wide">Gemini procesando...</h4>
-                            <p className="text-xs text-slate-400 mt-1 max-w-xs">Extrayendo texto, identificando moneda, marcas y peso de la etiqueta</p>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Botones de control */}
-                      <div className="flex flex-col gap-2">
-                        <div className="grid grid-cols-2 gap-2">
-                          {!isCameraActive ? (
-                            <button
-                              onClick={startCamera}
-                              disabled={isCurrentlyScanning}
-                              className="bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2.5 px-3 rounded-xl shadow transition active:scale-95 disabled:opacity-50 text-xs flex items-center justify-center gap-1.5"
-                            >
-                              <Camera className="w-4 h-4" />
-                              Encender Cámara
-                            </button>
-                          ) : (
-                            <button
-                              onClick={stopCamera}
-                              className="bg-slate-700 hover:bg-slate-600 text-slate-100 font-semibold py-2.5 px-3 rounded-xl transition active:scale-95 text-xs flex items-center justify-center gap-1.5"
-                            >
-                              Apagar Cámara
-                            </button>
-                          )}
-
-                          {isCameraActive && (
-                            <button
-                              onClick={capturePhotoAndScan}
-                              disabled={isCurrentlyScanning}
-                              className="bg-sky-600 hover:bg-sky-500 text-white font-semibold py-2.5 px-3 rounded-xl shadow transition active:scale-95 disabled:opacity-50 text-xs flex items-center justify-center gap-1.5"
-                            >
-                              <ScanLine className="w-4 h-4" />
-                              Capturar y Comparar
-                            </button>
-                          )}
-
-                          {scanCapturedImage && (
-                            <button
-                              onClick={() => {
-                                setScannedItem(null);
-                                setScanCapturedImage(null);
-                                startCamera();
-                              }}
-                              className="bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200 font-semibold py-2.5 px-3 rounded-xl transition active:scale-95 text-xs flex items-center justify-center gap-1.5"
-                            >
-                              Nueva Captura
-                            </button>
-                          )}
-                        </div>
-
-                        {/* Cargar Archivo Opcional */}
-                        <div className="relative border border-slate-200 border-dashed rounded-xl p-3 bg-slate-50 flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                             <Upload className="w-4 h-4 text-slate-400 shrink-0" />
-                             <span className="text-xs text-slate-500 font-medium">¿Sin cámara? Suba una foto:</span>
-                          </div>
-                          <label className="bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold px-3 py-1.5 border border-slate-200 rounded-lg cursor-pointer shadow-sm transition">
-                            Elegir Foto
-                            <input
-                              type="file"
-                              accept="image/*"
-                              onChange={handleScanFileUpload}
-                              className="hidden"
-                            />
-                          </label>
-                        </div>
-                      </div>
-
-                      {cameraError && (
-                        <div className="p-3 bg-red-50 border border-red-100 rounded-xl text-red-700 text-xs flex items-start gap-2">
-                          <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                          <span>{cameraError}</span>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Panel Derecho: Resultados e Interpretaciones */}
-                    <div className="md:col-span-6 flex flex-col gap-4">
-                      
-                      {!scannedItem && (
-                        <div className="border border-slate-100 bg-slate-50/50 rounded-2xl p-8 text-center h-full flex flex-col items-center justify-center">
-                          <ScanLine className="w-10 h-10 text-slate-300 mb-2 animate-bounce" />
-                          <h4 className="text-sm font-semibold text-slate-700">Esperando Captura de Precio</h4>
-                          <p className="text-xs text-slate-500 mt-1 max-w-xs">
-                            Encienda la cámara y apunte a una etiqueta, o suba una imagen. La IA extraerá los datos y buscaremos mejores precios.
-                          </p>
-                        </div>
-                      )}
-
-                      {scannedItem && (
-                        <div className="flex flex-col gap-4">
-                          
-                          {/* Datos editables extraídos por IA */}
-                          <div className="bg-slate-50 p-4 rounded-xl border border-slate-200/60 flex flex-col gap-3">
-                            <span className="text-[10px] font-bold tracking-widest text-emerald-600 bg-emerald-50 self-start px-2 py-0.5 rounded-full uppercase">Detalles Extraídos por IA</span>
-                            
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                              <div className="md:col-span-2">
-                                <label className="block text-slate-500 font-semibold mb-1">Nombre del Producto</label>
-                                <DebouncedInput
-                                  type="text"
-                                  value={scannedItem.productName}
-                                  onChange={(val) => setScannedItem(prev => ({ ...prev, productName: val }))}
-                                  className="w-full bg-white border border-slate-300 rounded-lg p-2 font-semibold text-slate-800"
-                                />
-                              </div>
-
-                              <div>
-                                <label className="block text-slate-500 font-semibold mb-1">Precio ($ ARS)</label>
-                                <DebouncedInput
-                                  type="number"
-                                  step="0.01"
-                                  value={String(scannedItem.price)}
-                                  onChange={(val) => setScannedItem(prev => ({ ...prev, price: Number(val) || 0 }))}
-                                  className="w-full bg-white border border-slate-300 rounded-lg p-2 font-semibold text-slate-800"
-                                />
-                              </div>
-
-                              <div>
-                                <label className="block text-slate-500 font-semibold mb-1">Supermercado</label>
-                                <DebouncedInput
-                                  type="text"
-                                  value={scannedItem.supermarket}
-                                  onChange={(val) => setScannedItem(prev => ({ ...prev, supermarket: val }))}
-                                  className="w-full bg-white border border-slate-300 rounded-lg p-2 font-semibold text-slate-800"
-                                />
-                              </div>
-
-                              <div>
-                                <label className="block text-slate-500 font-semibold mb-1">Cantidad Neto / Contenido</label>
-                                <DebouncedInput
-                                  type="number"
-                                  value={String(scannedItem.amount)}
-                                  onChange={(val) => setScannedItem(prev => ({ ...prev, amount: Number(val) || 1 }))}
-                                  className="w-full bg-white border border-slate-300 rounded-lg p-2 font-semibold text-slate-800"
-                                />
-                              </div>
-
-                              <div>
-                                <label className="block text-slate-500 font-semibold mb-1">Unidad Medida</label>
-                                <select
-                                  value={scannedItem.unit}
-                                  onChange={(e) => setScannedItem({ ...scannedItem, unit: e.target.value })}
-                                  className="w-full bg-white border border-slate-300 rounded-lg p-2 text-slate-800"
-                                >
-                                  <option value="unidad">unidades / unidad (u)</option>
-                                  <option value="g">gramos (g)</option>
-                                  <option value="kg">kilogramos (kg)</option>
-                                  <option value="L">litros (L)</option>
-                                  <option value="ml">mililitros (ml)</option>
-                                  <option value="oz">onzas (oz)</option>
-                                  <option value="lb">libras (lb)</option>
-                                  <option value="paquetes">paquetes</option>
-                                </select>
-                              </div>
-
-                              <div className="md:col-span-2">
-                                <label className="block text-slate-500 font-semibold mb-1">Categoría del Rubro</label>
-                                <select
-                                  value={scannedItem.category}
-                                  onChange={(e) => setScannedItem({ ...scannedItem, category: e.target.value })}
-                                  className="w-full bg-white border border-slate-300 rounded-lg p-2 text-slate-800"
-                                >
-                                  <option value="Produce">Verdulería y Frutas 🍏</option>
-                                  <option value="Meat">Carnes y Pescados 🥩</option>
-                                  <option value="Dairy">Lácteos y Huevos 🥛</option>
-                                  <option value="Bakery">Panadería 🍞</option>
-                                  <option value="Pantry">Almacén y Snacks 🍝</option>
-                                  <option value="Beverages">Bebidas 🥤</option>
-                                  <option value="Household">Limpieza y Hogar 🧼</option>
-                                  <option value="Other">Otros Artículos 📦</option>
-                                </select>
-                              </div>
-                            </div>
-
-                            {/* CORE UNIT PRICE CALCULATION DISPLAY */}
-                            {(() => {
-                              const norm = getUnitNormalization(scannedItem.amount || 1, scannedItem.unit || "unidad");
-                              const scannerUnitPrice = scannedItem.price * norm.multiplier;
-                              return (
-                                <div className="mt-2 bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-lg flex items-center justify-between text-slate-900">
-                                  <div className="flex items-center gap-2">
-                                    <Calculator className="w-5 h-5 text-emerald-600 shrink-0" />
-                                    <div>
-                                      <span className="text-[9px] block font-bold text-emerald-800 uppercase tracking-widest">CÁLCULO DE PRECIO UNITARIO</span>
-                                      <span className="text-sm font-extrabold text-emerald-950 font-mono">
-                                        {formatUnitPrice(scannerUnitPrice, norm.baseUnit)}
-                                      </span>
-                                    </div>
-                                  </div>
-                                  <span className="text-[9px] font-bold text-emerald-700 bg-emerald-500/20 px-2 py-0.5 rounded uppercase">Metrificado</span>
-                                </div>
-                              );
-                            })()}
-                          </div>
-
-                          {/* COMPARACIONES INTELIGENTES */}
-                          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-                            <h3 className="text-sm font-bold text-slate-800 mb-2.5 flex items-center gap-1.5">
-                              <TrendingUp className="w-4 h-4 text-sky-500" />
-                              Comparativa con Base de Datos
-                            </h3>
-
-                            {(() => {
-                              const queryStr = scannedItem.productName.toLowerCase();
-                              const matchedLocal = products.filter(p => 
-                                p.name.toLowerCase().includes(queryStr) || 
-                                queryStr.includes(p.name.toLowerCase())
-                              );
-
-                              const matchedOnline = findSimilarOnlineProducts(scannedItem.productName, scannedItem.category);
-
-                              const allDeals = [
-                                ...matchedLocal.map(p => ({
-                                  store: p.supermarket,
-                                  price: p.salePrice,
-                                  type: "Folleto Digital" as const,
-                                  unitDesc: `${p.amount}${p.unit}`,
-                                  unitPriceStr: formatUnitPrice(p.unitPrice, p.baseUnit)
-                                })),
-                                ...matchedOnline.map(o => ({
-                                  store: o.storeName,
-                                  price: o.price,
-                                  type: "Catálogo Online" as const,
-                                  unitDesc: `${o.amount}${o.unit}`,
-                                  unitPriceStr: formatUnitPrice(o.unitPrice, o.baseUnit)
-                                }))
-                              ];
-
-                              const currentScannerNorm = getUnitNormalization(scannedItem.amount || 1, scannedItem.unit || "unidad");
-                              const currentScannerUnitPrice = scannedItem.price * currentScannerNorm.multiplier;
-
-                              const bestKnownAlternative = allDeals.reduce((best, cur) => {
-                                if (cur.price < best.price) return cur;
-                                  return best;
-                              }, { store: scannedItem.supermarket, price: scannedItem.price, type: "Escaneo Actual", unitDesc: "", unitPriceStr: "" });
-
-                              const isGoodDeal = scannedItem.price <= bestKnownAlternative.price;
-
-                              return (
-                                <div className="space-y-3">
-                                  {/* Asesor de ofertas */}
-                                  <div className={`p-3 rounded-lg text-xs flex items-start gap-2.5 ${isGoodDeal ? 'bg-emerald-50 text-emerald-800 border border-emerald-100' : 'bg-rose-50 text-rose-800 border border-rose-100'}`}>
-                                    {isGoodDeal ? (
-                                      <>
-                                        <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                                        <div>
-                                          <p className="font-bold">¡Es una excelente oferta! 👍</p>
-                                          <p className="text-emerald-700 mt-0.5 font-sans">
-                                            El precio de <span className="font-bold">${scannedItem.price.toLocaleString("es-AR")}</span> es menor o igual al resto de los registros para este rubro. El precio más barato previo era de ${bestKnownAlternative.price.toLocaleString("es-AR")} en {bestKnownAlternative.store}.
-                                          </p>
-                                        </div>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Info className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
-                                        <div>
-                                          <p className="font-bold">¡Hay alternativas más baratas! 🛒</p>
-                                          <p className="text-rose-700 mt-0.5 font-sans">
-                                            Podrías ahorrar comprándolo en otro sitio. El artículo alternativo cuesta <span className="font-bold">${bestKnownAlternative.price.toLocaleString("es-AR")}</span> en {bestKnownAlternative.store} ({bestKnownAlternative.type}), ahorrándote <span className="font-bold">${(scannedItem.price - bestKnownAlternative.price).toLocaleString("es-AR")}</span> por unidad.
-                                          </p>
-                                        </div>
-                                      </>
-                                    )}
-                                  </div>
-
-                                  {/* Grilla de precios */}
-                                  <div className="border border-slate-100 rounded-lg overflow-hidden text-xs">
-                                    <div className="bg-slate-100 font-bold px-3 py-1.5 text-slate-600 grid grid-cols-12 gap-1 uppercase tracking-wider">
-                                      <span className="col-span-5">Establecimiento</span>
-                                      <span className="col-span-3 text-right">Contenido</span>
-                                      <span className="col-span-4 text-right">Precio</span>
-                                    </div>
-
-                                    {/* Escaneo actual */}
-                                    <div className="px-3 py-2 bg-emerald-50/70 border-b border-rose-100 grid grid-cols-12 gap-1 font-semibold text-emerald-950 items-center">
-                                      <span className="col-span-5 flex items-center gap-1 text-xs">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                                        {scannedItem.supermarket || "Góndola"} (Actual)
-                                      </span>
-                                      <span className="col-span-3 text-right text-slate-500">{scannedItem.amount} {scannedItem.unit}</span>
-                                      <span className="col-span-4 text-right font-bold text-slate-800">
-                                        ${scannedItem.price.toLocaleString("es-AR")}
-                                        <span className="text-[9px] block text-slate-500 font-normal">
-                                          {formatUnitPrice(currentScannerUnitPrice, currentScannerNorm.baseUnit)}
-                                        </span>
-                                      </span>
-                                    </div>
-
-                                    {/* Muestras anteriores */}
-                                    {allDeals.length === 0 ? (
-                                      <div className="px-3 py-4 text-center text-slate-400 italic font-sans text-[11px]">
-                                        Aún no hay folletos indexados en el catálogo que coincidan. Guardar esta medición creará la primera referencia histórica.
-                                      </div>
-                                    ) : (
-                                      allDeals.map((deal, dIdx) => (
-                                        <div key={dIdx} className="px-3 py-1.5 border-b border-slate-100 grid grid-cols-12 gap-1 items-center hover:bg-slate-50 transition text-[11px]">
-                                          <span className="col-span-5 text-slate-700 font-medium truncate">{deal.store} <span className="text-[9px] text-slate-400 block font-normal">{deal.type}</span></span>
-                                          <span className="col-span-3 text-right text-slate-500">{deal.unitDesc}</span>
-                                          <span className="col-span-4 text-right font-bold text-slate-800">
-                                            ${deal.price.toLocaleString("es-AR")}
-                                            <span className="text-[9px] block text-slate-400 font-normal">{deal.unitPriceStr}</span>
-                                          </span>
-                                        </div>
-                                      ))
-                                    )}
-                                  </div>
-                                </div>
-                              );
-                            })()}
-                          </div>
-
-                          {/* DYNAMIC COMPARISON WITH ARGENTINIAN ONLINE SEARCH CATALOGS */}
-                          {/* Site search links (clickable buttons) */}
-                          {catalogSources.filter(s => s.siteSearchEnabled && s.searchUrlTemplate).length > 0 && (
-                            <div className="bg-gradient-to-br from-slate-900 to-indigo-950 text-white p-4 rounded-xl border border-slate-800 shadow-lg relative overflow-hidden">
-                              <div className="absolute top-0 right-0 p-6 opacity-5 pointer-events-none">
-                                <Globe className="w-24 h-24 text-white" />
-                              </div>
-                              <h3 className="text-xs font-bold uppercase tracking-widest text-sky-400 mb-2 flex items-center gap-1.5">
-                                <Globe className="w-4 h-4 text-sky-400 animate-spin-slow" />
-                                Buscadores
-                              </h3>
-                              <p className="text-[11px] text-slate-300 mb-3 font-sans">
-                                Abrir "{scannedItem.productName}" en los sitios web de los supermercados.
-                              </p>
-                              <div className="space-y-2.5">
-                                {catalogSources.filter(s => s.siteSearchEnabled && s.searchUrlTemplate).map((s) => {
-                                  const encodedQuery = encodeURIComponent(scannedItem.productName);
-                                  const searchUrl = s.searchUrlTemplate!.replace("{producto}", encodedQuery);
-                                  return (
-                                    <div key={s.id} className="bg-slate-800/60 p-2.5 rounded-lg border border-slate-700/60 flex flex-col gap-2">
-                                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
-                                        <div>
-                                          <h4 className="text-xs font-bold text-sky-100">{s.name}</h4>
-                                          {s.description && <p className="text-[10px] text-slate-400 leading-snug">{s.description}</p>}
-                                        </div>
-                                        <a href={searchUrl} target="_blank" rel="noreferrer"
-                                          className="text-[11px] font-bold text-slate-950 bg-sky-400 hover:bg-sky-300 px-3 py-1.5 rounded-md flex items-center justify-center gap-1 transition shrink-0 active:scale-95">
-                                          🔍 Buscar en {s.name.split(" ")[0]}
-                                        </a>
-                                      </div>
-                                      {s.aiInterpretation && (
-                                        <div className="bg-slate-900/80 p-2 rounded border border-slate-700/50 text-[10px] text-slate-300 space-y-1 font-serif leading-normal whitespace-pre-wrap">
-                                          {s.aiInterpretation}
-                                        </div>
-                                      )}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Online Search (API + Scrape) */}
-                          {catalogSources.filter(s => s.searchMethod !== "none").length > 0 && (
-                            <div className="bg-gradient-to-br from-emerald-950 to-teal-950 text-white p-4 rounded-xl border border-emerald-800 shadow-lg">
-                              <h3 className="text-xs font-bold uppercase tracking-widest text-emerald-400 mb-2 flex items-center gap-1.5">
-                                <Database className="w-4 h-4 text-emerald-400" />
-                                Buscar Precios Online
-                              </h3>
-                              <p className="text-[11px] text-slate-300 mb-3 font-sans">
-                                Busca "{scannedItem.productName}" en las fuentes configuradas (API + Web).
-                              </p>
-                              <button onClick={() => executeOnlineSearch(scannedItem.productName)}
-                                disabled={isSearchingOnline}
-                                className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-400 text-white font-semibold px-4 py-2 rounded-xl text-xs transition flex items-center gap-1.5 active:scale-95 shadow">
-                                {isSearchingOnline ? (
-                                  <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Buscando...</>
-                                ) : (
-                                  <><Search className="w-3.5 h-3.5" /> Buscar Precios Online</>
-                                )}
-                              </button>
-
-                              {/* Inline results */}
-                              {onlineSearchResults.length > 0 && onlineSearchQuery === scannedItem.productName && (
-                                <div className="mt-3 max-h-48 overflow-y-auto">
-                                  <table className="w-full text-[10px] border-collapse">
-                                    <thead>
-                                      <tr className="border-b border-emerald-700/50">
-                                        <th className="text-left p-1.5 font-bold text-emerald-300">Tienda</th>
-                                        <th className="text-left p-1.5 font-bold text-emerald-300">Producto</th>
-                                        <th className="text-left p-1.5 font-bold text-emerald-300">Presentación</th>
-                                        <th className="text-right p-1.5 font-bold text-emerald-300">Precio</th>
-                                        <th className="text-center p-1.5 font-bold text-emerald-300"></th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {onlineSearchResults.map((item, idx) => (
-                                        <tr key={idx} className="border-b border-emerald-800/30 hover:bg-emerald-900/30">
-                                          <td className="p-1.5 text-slate-200">{item.shop}</td>
-                                          <td className="p-1.5 text-white font-medium">{item.productName}</td>
-                                          <td className="p-1.5 text-slate-300 whitespace-nowrap">{item.presentation}</td>
-                                          <td className="p-1.5 text-right text-emerald-300 font-bold whitespace-nowrap">${item.price.toFixed(2)}</td>
-                                          <td className="p-1.5 text-center">
-                                            <button onClick={() => handleAddApiProductToCatalog(item)}
-                                              className="text-emerald-300 hover:text-emerald-200 bg-emerald-800/50 hover:bg-emerald-700/50 p-1 rounded transition"
-                                              title="Agregar al catálogo">
-                                              <Plus className="w-3 h-3" />
-                                            </button>
-                                          </td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          {/* Botones de Acción */}
-                          <div className="flex flex-col sm:flex-row gap-2 mt-2">
-                            <button
-                              onClick={addScannedToCatalog}
-                              className="flex-1 bg-slate-900 hover:bg-slate-800 text-white font-semibold py-2.5 px-4 rounded-xl shadow transition active:scale-95 text-xs flex items-center justify-center gap-2"
-                            >
-                              <Plus className="w-4 h-4 text-emerald-400" />
-                              Guardar en Mi Catálogo
-                            </button>
-
-                            <button
-                              onClick={() => {
-                                const norm = getUnitNormalization(scannedItem.amount || 1, scannedItem.unit || "unidad");
-                                const simulatedProd: Product = {
-                                  id: `sim-${Date.now()}`,
-                                  name: scannedItem.productName,
-                                  category: scannedItem.category || "Produce",
-                                  originalPrice: scannedItem.price,
-                                  salePrice: scannedItem.price,
-                                  amount: scannedItem.amount || 1,
-                                  unit: scannedItem.unit || "unidad",
-                                  supermarket: scannedItem.supermarket || "Góndola Escaneada",
-                                  dateExtracted: new Date().toISOString(),
-                                  unitPrice: scannedItem.price * norm.multiplier,
-                                  baseUnit: norm.baseUnit,
-                                  sourceType: "manual"
-                                };
-                                addToShoppingList(simulatedProd);
-                                triggerSuccess(`Insertado "${scannedItem.productName}" en su plan activo.`);
-                              }}
-                              className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2.5 px-4 rounded-xl shadow transition active:scale-95 text-xs flex items-center justify-center gap-2"
-                            >
-                              <ShoppingCart className="w-4 h-4" />
-                              Agregar a Lista de Compras
-                            </button>
-                          </div>
-
-                        </div>
-                      )}
-
-                    </div>
-                  </div>
-                )}
-              </div>
-            </motion.div>
+            <ScanTab
+              videoRef={videoRef}
+              apiKey={apiKey}
+              isCameraActive={isCameraActive}
+              scannedItem={scannedItem}
+              setScannedItem={setScannedItem}
+              scanCapturedImage={scanCapturedImage}
+              setScanCapturedImage={setScanCapturedImage}
+              isCurrentlyScanning={isCurrentlyScanning}
+              cameraError={cameraError}
+              products={products}
+              catalogSources={catalogSources}
+              onlineSearchResults={onlineSearchResults}
+              isSearchingOnline={isSearchingOnline}
+              startCamera={startCamera}
+              stopCamera={stopCamera}
+              capturePhotoAndScan={capturePhotoAndScan}
+              handleScanFileUpload={handleScanFileUpload}
+              executeOnlineSearch={executeOnlineSearch}
+              handleAddApiProductToCatalog={handleAddApiProductToCatalog}
+              addScannedToCatalog={addScannedToCatalog}
+              addToShoppingList={addToShoppingList}
+              triggerSuccess={triggerSuccess}
+              setActiveTab={setActiveTab}
+            />
           )}
-
-          {/* TAB 2: UPLOAD & SCANNERS */}
+{/* TAB 2: UPLOAD & SCANNERS */}
           {activeTab === "upload" && (
             <motion.div
               key="upload-tab"
@@ -4358,355 +3332,25 @@ export default function App() {
 
           {/* TAB 3: SHOPPING LIST & BUDGET OPTIMIZER */}
           {activeTab === "shopping" && (
-            <motion.div
-              key="shopping-tab"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start"
-            >
-              
-              {/* Left Side: Active List */}
-              <div className="lg:col-span-12 xl:col-span-7 bg-white p-5 rounded-2xl shadow-sm border border-slate-100">
-                <div className="flex justify-between items-center pb-3 border-b border-slate-150 mb-4">
-                  <div>
-                    <h2 className="text-base font-bold text-slate-800 flex items-center gap-1.5">
-                      <ShoppingCart className="w-5 h-5 text-sky-500" />
-                      Planned Shopping List
-                    </h2>
-                    <p className="text-xs text-slate-400">Add flyer deals or mock inputs to map your cart</p>
-                  </div>
-                  {shoppingList.length > 0 && (
-                    <button
-                      onClick={clearList}
-                      className="text-xs text-slate-400 hover:text-rose-500 transition font-medium"
-                    >
-                      Clear All Items
-                    </button>
-                  )}
-                </div>
-
-                <div className="divide-y divide-slate-100">
-                  {shoppingList.map((item) => (
-                    <div 
-                      key={item.id} 
-                      className={`py-3.5 flex items-center justify-between gap-4 transition ${
-                        item.checked ? "opacity-50" : ""
-                      }`}
-                    >
-                      {/* Left: Check and details */}
-                      <div className="flex items-start gap-3 min-w-0">
-                        <button
-                          onClick={() => toggleListItemChecked(item.id)}
-                          className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 mt-0.5 transition ${
-                            item.checked 
-                              ? "bg-slate-900 border-slate-950 text-white" 
-                              : "border-slate-300 hover:border-sky-500 bg-white"
-                          }`}
-                        >
-                          {item.checked && <Check className="w-3.5 h-3.5 stroke-[3]" />}
-                        </button>
-
-                        <div className="min-w-0">
-                          <h4 className={`text-sm font-semibold text-slate-800 truncate leading-snug ${
-                            item.checked ? "line-through text-slate-400" : ""
-                          }`}>
-                            {item.name}
-                          </h4>
-                          <div className="flex flex-wrap text-xs text-slate-400 gap-x-2 mt-0.5">
-                            <span className="flex items-center gap-1 text-slate-600 bg-slate-100 px-1.5 py-0.2 rounded font-medium">
-                              <Store className="w-3 h-3 text-slate-400" />
-                              {item.supermarket}
-                            </span>
-                            <span>•</span>
-                            <span>{item.amount} {item.unit}</span>
-                            <span>•</span>
-                            <span className="font-mono">{formatUnitPrice(item.unitPrice, item.baseUnit)}</span>
-                          </div>
-
-                          {/* Comparison helper indicators */}
-                          {(() => {
-                            const lastPur = getLastPurchaseInfo(item.name);
-                            const bestOffer = getBestAvailableOffer(item.name, item.category);
-                            
-                            return (
-                              <div className="mt-2 space-y-1 text-[11px] font-sans">
-                                {lastPur && (
-                                  <div className="flex flex-wrap items-center gap-1.5 text-slate-500">
-                                    <span className="font-semibold text-slate-600">Historial de Compra:</span>
-                                    <span>${lastPur.unitPriceOfItem.toFixed(2)}/u ({lastPur.store} • {lastPur.date})</span>
-                                    {item.price < lastPur.unitPriceOfItem ? (
-                                      <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1 rounded animate-pulse">
-                                        ¡Ahorras {( ( (lastPur.unitPriceOfItem - item.price) / lastPur.unitPriceOfItem ) * 100 ).toFixed(0)}%!
-                                      </span>
-                                    ) : item.price > lastPur.unitPriceOfItem ? (
-                                      <span className="text-[10px] font-semibold text-rose-500 bg-rose-50 px-1 rounded">
-                                        +{(((item.price - lastPur.unitPriceOfItem) / lastPur.unitPriceOfItem) * 100).toFixed(0)}% más costoso
-                                      </span>
-                                    ) : (
-                                      <span className="text-[10px] text-slate-400 bg-slate-50 px-1 rounded">Mismo precio</span>
-                                    )}
-                                  </div>
-                                )}
-                                
-                                {bestOffer && bestOffer.price < item.price && (
-                                  <div className="flex flex-wrap items-center gap-1.5 text-indigo-600 bg-indigo-50/70 py-1.5 px-2.5 rounded-lg border border-indigo-100 mt-1">
-                                    <Sparkles className="w-3 h-3 text-indigo-500 shrink-0" />
-                                    <span className="text-[10 px] sm:text-xs">
-                                      Oferta encontrada: <strong>${bestOffer.price.toFixed(2)}</strong> en <strong>{bestOffer.supermarket}</strong>
-                                      {bestOffer.sourceType === "brochure" ? " (Folleto subido)" : " (Online)"}
-                                    </span>
-                                    <button
-                                      id={`btn-apply-offer-${item.id}`}
-                                      onClick={() => {
-                                        const norm = getUnitNormalization(item.amount, item.unit);
-                                        const updatedItem = {
-                                          ...item,
-                                          price: bestOffer.price,
-                                          supermarket: bestOffer.supermarket,
-                                          unitPrice: bestOffer.price * norm.multiplier
-                                        };
-                                        db.saveShoppingListItem(updatedItem);
-                                        setShoppingList(db.getShoppingList());
-                                        triggerSuccess(`Actualizado ${item.name} al precio de oferta de $${bestOffer.price.toFixed(2)} en ${bestOffer.supermarket}!`);
-                                      }}
-                                      className="ml-auto font-bold underline hover:text-indigo-800 text-[10px] shrink-0"
-                                    >
-                                      Aplicar Oferta
-                                    </button>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })()}
-                        </div>
-                      </div>
-
-                      {/* Right: Quantity modifiers and pricing */}
-                      <div className="flex items-center gap-4 shrink-0 text-right">
-                        
-                        {/* Quantity Counter */}
-                        <div className="flex items-center border border-slate-200 rounded-lg bg-slate-50">
-                          <button
-                            onClick={() => updateListItemQuantity(item.id, item.quantity - 1)}
-                            className="px-2.5 py-1 text-slate-500 hover:bg-slate-100 font-bold"
-                          >
-                            -
-                          </button>
-                          <span className="px-2 text-xs font-bold text-slate-800">{item.quantity}</span>
-                          <button
-                            onClick={() => updateListItemQuantity(item.id, item.quantity + 1)}
-                            className="px-2.5 py-1 text-slate-500 hover:bg-slate-100 font-bold"
-                          >
-                            +
-                          </button>
-                        </div>
-
-                        {/* Calculated Subtotal */}
-                        <div className="w-16">
-                          <p className="text-sm font-bold text-slate-800">
-                            ${(item.price * item.quantity).toFixed(2)}
-                          </p>
-                          <p className="text-[10px] text-slate-400 font-medium">(${item.price.toFixed(2)} ea)</p>
-                        </div>
-
-                        <button
-                          onClick={() => deleteListItem(item.id)}
-                          className="text-slate-300 hover:text-rose-500 rounded p-1"
-                        >
-                          <Trash className="w-3.5 h-3.5" />
-                        </button>
-
-                      </div>
-
-                    </div>
-                  ))}
-
-                  {shoppingList.length === 0 && (
-                    <div className="py-12 text-center text-slate-400">
-                      <ShoppingCart className="w-8 h-8 text-slate-300 mx-auto mb-3" />
-                      <p className="text-sm font-bold text-slate-600">Your Shopping List is Empty</p>
-                      <p className="text-xs text-slate-400 mt-1 max-w-[250px] mx-auto">
-                        Return to the Product Catalog to add booklet items, or configure custom ones with the seeder.
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-              </div>
-
-              {/* Right Side: Budget Optimization Insights */}
-              <div className="lg:col-span-12 xl:col-span-5 flex flex-col gap-4">
-                
-                {shoppingOptimization && (
-                  <>
-                    
-                    {/* Value Metrics */}
-                    <div className="bg-gradient-to-br from-slate-900 to-slate-800 text-white p-5 rounded-2xl shadow-md border border-slate-700/50">
-                      <h3 className="text-xs uppercase font-bold text-sky-400 tracking-wider flex items-center gap-1.5">
-                        <Calculator className="w-4 h-4" />
-                        AI Budget Optimization Insights
-                      </h3>
-
-                      <div className="grid grid-cols-2 gap-4 mt-4">
-                        <div>
-                          <p className="text-[10px] text-slate-400 font-medium">As-Selected Total</p>
-                          <p className="text-lg font-bold mt-0.5 text-slate-200">${shoppingOptimization.activeSelectedListTotal.toFixed(2)}</p>
-                        </div>
-                        <div>
-                          <p className="text-[10px] text-sky-300 font-semibold">Cheapest Split Path</p>
-                          <p className="text-lg font-extrabold mt-0.5 text-emerald-400">${shoppingOptimization.absoluteCheapestCost.toFixed(2)}</p>
-                        </div>
-                      </div>
-
-                      {/* Savings alert pill */}
-                      {shoppingOptimization.splitShoppingSavings > 0 ? (
-                        <div className="mt-4 bg-emerald-500/10 border border-emerald-500/20 p-3 rounded-xl flex items-center justify-between">
-                          <div>
-                            <p className="text-xs font-bold text-emerald-400">Estimated Saving Potential</p>
-                            <p className="text-[10px] text-emerald-300/80">By split-buying across standard deals</p>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-base font-extrabold text-emerald-400">
-                              -${shoppingOptimization.splitShoppingSavings.toFixed(2)}
-                            </p>
-                            <p className="text-[9px] bg-emerald-400 text-slate-950 font-bold px-1 rounded inline-block mt-0.5">
-                              SAVE {shoppingOptimization.splitSavingsPct.toFixed(0)}%
-                            </p>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="mt-4 bg-slate-800 border border-slate-700 p-3 rounded-xl text-center text-xs text-slate-400">
-                          🎉 Your list is already fully optimized for the absolute lowest pricing!
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Split Shopping Plan breakdown */}
-                    {shoppingOptimization.splitShoppingSavings > 0 && (
-                      <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col">
-                        <h3 className="text-xs uppercase font-bold text-slate-400 tracking-wider mb-3">
-                          Split Deal Action Plan
-                        </h3>
-                        
-                        <div className="flex flex-col gap-2 max-h-[30vh] overflow-y-auto">
-                          {shoppingOptimization.splitShoppingPlan.map((planItem, idx) => {
-                            const isChanged = planItem.originalMarket !== planItem.bestMarket;
-                            return (
-                              <div key={idx} className="p-2.5 bg-slate-50 border border-slate-150 rounded-xl text-xs flex justify-between items-center gap-3">
-                                <div className="min-w-0">
-                                  <p className="font-semibold text-slate-800 truncate">{planItem.itemName}</p>
-                                  <p className="text-[10px] text-slate-400 mt-0.5">
-                                    Qty: {planItem.quantity}
-                                  </p>
-                                </div>
-                                <div className="text-right shrink-0">
-                                  <p className="font-bold text-slate-900">
-                                    Buy at <span className="text-sky-600 font-extrabold">{planItem.bestMarket}</span>
-                                  </p>
-                                  <div className="flex items-center gap-1 justify-end mt-0.5">
-                                    <span className="text-[10px] font-mono text-slate-800 font-semibold">
-                                      ${(planItem.bestPrice * planItem.quantity).toFixed(2)}
-                                    </span>
-                                    {isChanged && (
-                                      <span className="text-[9px] text-rose-500 line-through">
-                                        ${(planItem.originalPrice * planItem.quantity).toFixed(2)}
-                                      </span>
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Cost comparison by single Supermarket block */}
-                    <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100">
-                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Full Cart cost comparison by Store</h4>
-                      <div className="flex flex-col gap-2.5">
-                        {shoppingOptimization.marketBudgets.map((budget, idx) => {
-                          const isWorse = budget.totalCost > shoppingOptimization.activeSelectedListTotal;
-                          return (
-                            <div key={idx} className="flex items-center justify-between text-xs p-2 rounded-lg border border-slate-100 group">
-                              <div className="flex items-center gap-2">
-                                <span className="w-5 h-5 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center font-bold text-[10px]">
-                                  {idx + 1}
-                                </span>
-                                <span className="font-semibold text-slate-700">{budget.marketName}</span>
-                              </div>
-                              <div className="text-right">
-                                <span className="font-bold text-slate-900">${budget.totalCost.toFixed(2)}</span>
-                                <span className={`text-[9px] block ${isWorse ? 'text-rose-500' : 'text-emerald-500 font-semibold'}`}>
-                                  {budget.percentSaved > 0 
-                                    ? `Save ${budget.percentSaved.toFixed(0)}% vs Selected` 
-                                    : budget.percentSaved < 0 
-                                    ? `+${Math.abs(budget.percentSaved).toFixed(0)}% More expensive`
-                                    : 'Selected baseline'}
-                                </span>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Tarjeta de Sugerencias Rápidas */}
-                    <div className="bg-gradient-to-br from-amber-50 to-orange-50/50 p-5 rounded-2xl shadow-sm border border-amber-200/60 flex flex-col justify-between">
-                      <div>
-                        <h4 className="text-xs font-bold text-amber-800 uppercase tracking-wider mb-1 flex items-center gap-1.5">
-                          <Sparkles className="w-4 h-4 text-amber-600" />
-                          ¿Qué te falta comprar?
-                        </h4>
-                        <p className="text-[11px] text-amber-700/80 mb-3 leading-snug">
-                          Usa Inteligencia Artificial para recomendar productos habituales basados en tus tickets de compra guardados en Argentina.
-                        </p>
-                        
-                        {suggestedItems.length > 0 ? (
-                          <div className="flex flex-col gap-1.5 mb-3 max-h-[140px] overflow-y-auto scrollbar-none">
-                            {suggestedItems.slice(0, 3).map((item, idx) => (
-                              <div key={idx} className="flex justify-between items-center p-2 bg-white rounded-xl text-xs border border-amber-100/50">
-                                <div className="truncate min-w-0 pr-2">
-                                  <span className="font-semibold text-slate-800">{item.name}</span>
-                                  <span className="text-[10px] block text-slate-400 truncate">{item.supermarket} • {item.reason}</span>
-                                </div>
-                                <button
-                                  onClick={() => handleAddSuggestedToShopping(item)}
-                                  className="p-1 text-white bg-amber-500 rounded hover:bg-amber-600 shrink-0 cursor-pointer"
-                                  title="Añadir"
-                                >
-                                  <Plus className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="text-[10px] text-slate-400 italic mb-3">Sube tickets en la pestaña "Historial y Tickets" para obtener recomendaciones automáticas de reposición.</p>
-                        )}
-                      </div>
-                      
-                      {receipts.length > 0 && (
-                        <button
-                          onClick={handleGenerateAISuggestions}
-                          disabled={isGeneratingSuggestions}
-                          className="w-full py-2 bg-amber-500 hover:bg-amber-600 font-bold text-white text-xs rounded-xl flex items-center justify-center gap-1 transition-all disabled:bg-slate-200 disabled:text-slate-400 cursor-pointer"
-                        >
-                          <Sparkles className="w-3.5 h-3.5" />
-                          {isGeneratingSuggestions ? "Analizando tickets..." : suggestedItems.length > 0 ? "Actualizar Sugerencias" : "Generar Sugerencias de IA"}
-                        </button>
-                      )}
-                    </div>
-
-                  </>
-                )}
-
-              </div>
-
-            </motion.div>
+            <ShoppingListTab
+              shoppingList={shoppingList}
+              suggestedItems={suggestedItems}
+              isGeneratingSuggestions={isGeneratingSuggestions}
+              receipts={receipts}
+              shoppingOptimization={shoppingOptimization}
+              clearList={clearList}
+              toggleListItemChecked={toggleListItemChecked}
+              updateListItemQuantity={updateListItemQuantity}
+              deleteListItem={deleteListItem}
+              handleAddSuggestedToShopping={handleAddSuggestedToShopping}
+              handleGenerateAISuggestions={handleGenerateAISuggestions}
+              getLastPurchaseInfo={getLastPurchaseInfo}
+              getBestAvailableOffer={getBestAvailableOffer}
+              setShoppingList={setShoppingList}
+              triggerSuccess={triggerSuccess}
+            />
           )}
-
-          {/* TAB 6 (NUEVO): TICKETS Y COMPRAS */}
+{/* TAB 6 (NUEVO): TICKETS Y COMPRAS */}
           {activeTab === "receipts" && (
             <motion.div
               key="receipts-tab"
@@ -5500,11 +4144,61 @@ function doPost(e) {
                            .setMimeType(ContentService.MimeType.JSON);
     }
     
+    if (action === "proxyLogin") {
+      var loginUrl = data.loginUrl;
+      var loginPayload = data.loginPayload || {};
+      var captchaToken = data.captchaToken || null;
+      var contentType = data.contentType || "application/x-www-form-urlencoded";
+
+      if (captchaToken && loginPayload["token"] === "{captcha}") loginPayload["token"] = captchaToken;
+
+      var loginOpts = {
+        method: "POST",
+        payload: loginPayload,
+        contentType: contentType,
+        muteHttpExceptions: true,
+        followRedirects: true
+      };
+      var loginResponse = UrlFetchApp.fetch(loginUrl, loginOpts);
+      var respHeaders = loginResponse.getHeaders();
+      var allCookies = respHeaders["Set-Cookie"] || respHeaders["set-cookie"] || "";
+
+      var sessionId = Utilities.getUuid();
+      var props = PropertiesService.getScriptProperties();
+      props.setProperty("sc_" + sessionId, allCookies);
+      props.setProperty("sc_ts_" + sessionId, String(new Date().getTime()));
+
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "success",
+        sessionId: sessionId,
+        responseCode: loginResponse.getResponseCode()
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (action === "proxyLogout") {
+      var sid = data.sessionId;
+      if (sid) {
+        var p = PropertiesService.getScriptProperties();
+        p.deleteProperty("sc_" + sid);
+        p.deleteProperty("sc_ts_" + sid);
+      }
+      return ContentService.createTextOutput(JSON.stringify({ status: "success" }))
+                           .setMimeType(ContentService.MimeType.JSON);
+    }
+
     if (action === "proxyFetch") {
       var targetUrl = data.targetUrl;
       var method = data.method || "GET";
       var reqHeaders = data.headers || {};
       var payload = data.body || null;
+      var sessionId = data.sessionId || null;
+
+      if (sessionId) {
+        var props = PropertiesService.getScriptProperties();
+        var storedCookies = props.getProperty("sc_" + sessionId);
+        if (storedCookies) reqHeaders["Cookie"] = storedCookies;
+      }
+
       var opts = { method: method, headers: reqHeaders, muteHttpExceptions: true };
       if (payload) { opts.payload = payload; }
       var gasResponse = UrlFetchApp.fetch(targetUrl, opts);
@@ -5588,6 +4282,18 @@ function doPost(e) {
                               className="bg-slate-100 hover:bg-amber-50 text-amber-700 hover:text-amber-800 font-semibold px-2.5 py-1.5 rounded-lg border border-slate-200 text-[10px] transition flex items-center gap-1 disabled:opacity-50">
                               {testingSourceId === s.id ? "Probando..." : "Probar"}
                             </button>
+                            {s.sessionMethod === "form" && !s.sessionId && (
+                              <button onClick={() => { setLoginSource(s); setLoginFormData({}); }}
+                                className="bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold px-2.5 py-1.5 rounded-lg border border-rose-200 text-[10px] transition">
+                                Iniciar
+                              </button>
+                            )}
+                            {s.sessionMethod === "form" && s.sessionId && (
+                              <button onClick={() => handleLogoutCatalogSource(s)}
+                                className="bg-slate-100 hover:bg-rose-50 text-slate-600 hover:text-rose-700 font-semibold px-2.5 py-1.5 rounded-lg border border-slate-200 text-[10px] transition">
+                                Cerrar Sesión
+                              </button>
+                            )}
                             <button onClick={() => handleDeleteCatalogSource(s.id, s.name)}
                               className="text-rose-500 hover:text-rose-600 font-bold bg-rose-50 hover:bg-rose-100 p-1.5 rounded-lg border border-rose-100 transition"
                               title="Eliminar">
@@ -5622,6 +4328,54 @@ function doPost(e) {
                   </div>
                 )}
               </div>
+
+              {loginSource && (
+                <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setLoginSource(null)}>
+                  <div className="bg-white p-5 rounded-2xl shadow-xl max-w-md w-full mx-4 space-y-3" onClick={(e) => e.stopPropagation()}>
+                    <h4 className="text-xs font-bold text-slate-800">Iniciar sesión — {loginSource.name}</h4>
+                    {loginSource.sessionCaptchaSiteKey && (
+                      <p className="text-[9px] text-amber-600 bg-amber-50 p-2 rounded">
+                        Este sitio requiere resolver un captcha. Ábralo en una pestaña separada, resuélvalo y pegue el token.
+                      </p>
+                    )}
+                    {loginSource.sessionLoginFields && Object.keys(loginSource.sessionLoginFields).map((key) => {
+                      const tmpl = loginSource.sessionLoginFields![key];
+                      const placeholders = [...tmpl.matchAll(/\{(\w+)\}/g)].map(m => m[1]);
+                      const fieldLabel = placeholders.join(", ") || key;
+                      return (
+                        <div key={key}>
+                          <label className="block text-[10px] text-slate-600 font-semibold mb-1">{fieldLabel}</label>
+                          <input placeholder={fieldLabel}
+                            value={loginFormData[fieldLabel] || ""}
+                            onChange={(e) => setLoginFormData(d => ({ ...d, [fieldLabel]: e.target.value }))}
+                            className="w-full bg-white border border-slate-200 rounded-lg p-2 text-xs focus:border-rose-500 focus:outline-none" />
+                        </div>
+                      );
+                    })}
+                    {loginSource.sessionCaptchaSiteKey && (
+                      <div>
+                        <label className="block text-[10px] text-slate-600 font-semibold mb-1">Token reCAPTCHA</label>
+                        <input placeholder="Pegue el token aquí"
+                          value={loginFormData["__captcha__"] || ""}
+                          onChange={(e) => setLoginFormData(d => ({ ...d, ["__captcha__"]: e.target.value }))}
+                          className="w-full bg-white border border-slate-200 rounded-lg p-2 text-xs font-mono focus:border-rose-500 focus:outline-none" />
+                      </div>
+                    )}
+                    <div className="flex gap-2 pt-1">
+                      <button onClick={() => {
+                        handleLoginCatalogSource(loginSource, loginFormData, loginFormData["__captcha__"]);
+                        setLoginSource(null);
+                      }} className="bg-rose-600 hover:bg-rose-700 text-white font-semibold py-2 px-4 rounded-xl text-xs transition">
+                        Iniciar Sesión
+                      </button>
+                      <button onClick={() => setLoginSource(null)}
+                        className="text-slate-500 hover:text-slate-700 font-semibold bg-slate-100 hover:bg-slate-200 py-2 px-4 rounded-xl text-xs transition">
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <StoreAnalyzerWizard
                 apiKey={apiKey}

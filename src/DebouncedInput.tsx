@@ -11,24 +11,36 @@ interface Props extends Omit<React.InputHTMLAttributes<HTMLInputElement>, "onCha
 export default function DebouncedInput({ value, onChange, delay = 300, onEnter, onKeyDown, className = "", ...props }: Props) {
   const [local, setLocal] = useState(value);
   const timer = useRef<ReturnType<typeof setTimeout>>();
+  const lastSent = useRef(value);
 
-  useEffect(() => { setLocal(value); }, [value]);
+  useEffect(() => {
+    if (local === lastSent.current) {
+      setLocal(value);
+    }
+  }, [value, local]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = e.target.value;
     setLocal(v);
     clearTimeout(timer.current);
-    timer.current = setTimeout(() => onChange(v), delay);
+    timer.current = setTimeout(() => {
+      lastSent.current = v;
+      onChange(v);
+    }, delay);
   };
 
   const handleBlur = () => {
     clearTimeout(timer.current);
-    if (local !== value) onChange(local);
+    if (local !== value) {
+      lastSent.current = local;
+      onChange(local);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       clearTimeout(timer.current);
+      lastSent.current = local;
       onChange(local);
       onEnter?.(local);
     }

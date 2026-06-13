@@ -29,6 +29,16 @@ export default function CatalogSourceForm({ initialData, interpretingId, onSave,
   const [apiDefaultCategory, setApiDefaultCategory] = useState("Other");
   const [scrapeNotes, setScrapeNotes] = useState("");
 
+  // Location fields
+  const [salesChannel, setSalesChannel] = useState("");
+  const [postalCode, setPostalCode] = useState("");
+
+  // Session fields
+  const [sessionMethod, setSessionMethod] = useState<"none" | "form">("none");
+  const [sessionLoginUrl, setSessionLoginUrl] = useState("");
+  const [sessionLoginFieldsJson, setSessionLoginFieldsJson] = useState("");
+  const [sessionCaptchaSiteKey, setSessionCaptchaSiteKey] = useState("");
+
   useEffect(() => {
     if (initialData) {
       setName(initialData.name || "");
@@ -47,6 +57,12 @@ export default function CatalogSourceForm({ initialData, interpretingId, onSave,
       setApiCorsProxyUrl(initialData.apiCorsProxyUrl || "");
       setApiDefaultCategory(initialData.apiDefaultCategory || "Other");
       setScrapeNotes(initialData.scrapeNotes || "");
+      setSalesChannel(initialData.salesChannel || "");
+      setPostalCode(initialData.postalCode || "");
+      setSessionMethod(initialData.sessionMethod || "none");
+      setSessionLoginUrl(initialData.sessionLoginUrl || "");
+      setSessionLoginFieldsJson(initialData.sessionLoginFields ? JSON.stringify(initialData.sessionLoginFields, null, 2) : "");
+      setSessionCaptchaSiteKey(initialData.sessionCaptchaSiteKey || "");
     }
   }, [initialData]);
 
@@ -55,8 +71,10 @@ export default function CatalogSourceForm({ initialData, interpretingId, onSave,
 
     let parsedHeaders: Record<string, string> | undefined;
     let parsedQueryParams: Record<string, string> | undefined;
+    let parsedSessionFields: Record<string, string> | undefined;
     try { if (apiHeadersJson.trim()) parsedHeaders = JSON.parse(apiHeadersJson.trim()); } catch {}
     try { if (apiQueryParamsJson.trim()) parsedQueryParams = JSON.parse(apiQueryParamsJson.trim()); } catch {}
+    try { if (sessionLoginFieldsJson.trim()) parsedSessionFields = JSON.parse(sessionLoginFieldsJson.trim()); } catch {}
 
     const source: CatalogSource = {
       ...(initialData ? { id: initialData.id } : { id: `cat-${Date.now()}` }),
@@ -67,6 +85,12 @@ export default function CatalogSourceForm({ initialData, interpretingId, onSave,
       aiInterpretation: aiInterpretation || undefined,
       siteSearchEnabled,
       searchMethod: searchMethod,
+      salesChannel: salesChannel.trim() || undefined,
+      postalCode: postalCode.trim() || undefined,
+      sessionMethod: sessionMethod === "form" ? "form" : "none",
+      sessionLoginUrl: sessionLoginUrl.trim() || undefined,
+      sessionLoginFields: parsedSessionFields,
+      sessionCaptchaSiteKey: sessionCaptchaSiteKey.trim() || undefined,
       ...(searchMethod === "api" ? {
         apiMethod,
         apiUrl: apiUrl.trim() || undefined,
@@ -248,6 +272,68 @@ export default function CatalogSourceForm({ initialData, interpretingId, onSave,
                   value={scrapeNotes} onChange={(e) => setScrapeNotes(e.target.value)}
                   className="w-full bg-white border border-slate-200 rounded-lg p-2 text-[11px] focus:border-sky-500 focus:outline-none" />
               </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* LOCATION-SPECIFIC PRICING */}
+      <div className="border-t border-slate-200 pt-3">
+        <h4 className="text-[10px] font-bold tracking-widest text-amber-600 uppercase mb-2">Precios por ubicación</h4>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          <div>
+            <label className="block text-slate-600 font-semibold mb-1">Sales Channel (sc)</label>
+            <input type="text" placeholder="Ej: 1, 32, 33, 34"
+              value={salesChannel} onChange={(e) => setSalesChannel(e.target.value)}
+              className="w-full bg-white border border-slate-200 rounded-lg p-2 font-mono text-[11px] focus:border-amber-500 focus:outline-none" />
+          </div>
+          <div>
+            <label className="block text-slate-600 font-semibold mb-1">Código Postal</label>
+            <input type="text" placeholder="Ej: C1425AAA"
+              value={postalCode} onChange={(e) => setPostalCode(e.target.value)}
+              className="w-full bg-white border border-slate-200 rounded-lg p-2 font-mono text-[11px] focus:border-amber-500 focus:outline-none" />
+          </div>
+        </div>
+      </div>
+
+      {/* SESSION / MEMBERSHIP LOGIN */}
+      <div className="border-t border-slate-200 pt-3">
+        <h4 className="text-[10px] font-bold tracking-widest text-rose-600 uppercase mb-2">Inicio de sesión / Membresía</h4>
+        <div className="text-xs space-y-3">
+          <div className="flex items-center gap-4">
+            <label className="text-slate-600 font-semibold">Método:</label>
+            <select value={sessionMethod}
+              onChange={(e) => setSessionMethod(e.target.value as "none" | "form")}
+              className="bg-white border border-slate-200 rounded-lg p-2 focus:border-rose-500 focus:outline-none">
+              <option value="none">Ninguno</option>
+              <option value="form">Formulario de login</option>
+            </select>
+          </div>
+          {sessionMethod === "form" && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-rose-50/50 rounded-lg border border-rose-100">
+              <div className="sm:col-span-2">
+                <label className="block text-slate-600 font-semibold mb-1">URL de login</label>
+                <input type="text" placeholder="https://comerciante.carrefour.com.ar/login"
+                  value={sessionLoginUrl} onChange={(e) => setSessionLoginUrl(e.target.value)}
+                  className="w-full bg-white border border-slate-200 rounded-lg p-2 font-mono text-[11px] focus:border-rose-500 focus:outline-none" />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-slate-600 font-semibold mb-1">Campos del formulario (JSON)</label>
+                <input type="text" placeholder='{"numberId":"{dni}","name":"{name}","phone":"{phone}","email":"{email}"}'
+                  value={sessionLoginFieldsJson} onChange={(e) => setSessionLoginFieldsJson(e.target.value)}
+                  className="w-full bg-white border border-slate-200 rounded-lg p-2 font-mono text-[11px] focus:border-rose-500 focus:outline-none" />
+              </div>
+              <div>
+                <label className="block text-slate-600 font-semibold mb-1">reCAPTCHA Site Key</label>
+                <input type="text" placeholder="6LdiZHIqAAAAA..."
+                  value={sessionCaptchaSiteKey} onChange={(e) => setSessionCaptchaSiteKey(e.target.value)}
+                  className="w-full bg-white border border-slate-200 rounded-lg p-2 font-mono text-[11px] focus:border-rose-500 focus:outline-none" />
+              </div>
+              {initialData?.sessionId && (
+                <div className="flex items-center">
+                  <span className="text-[10px] text-emerald-600 font-semibold bg-emerald-50 px-2 py-1 rounded">Sesión activa</span>
+                </div>
+              )}
             </div>
           )}
         </div>

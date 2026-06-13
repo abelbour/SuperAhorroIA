@@ -114,6 +114,18 @@ export interface CatalogSource {
 
   // Scrape fields (when searchMethod === "scrape")
   scrapeNotes?: string;
+
+  // Location-specific pricing (VTEX Checkout Simulation API)
+  salesChannel?: string;
+  postalCode?: string;
+
+  // Session / membership login
+  sessionMethod?: "none" | "form";
+  sessionLoginUrl?: string;
+  sessionLoginFields?: Record<string, string>; // template e.g. {"numberId":"{dni}","name":"{name}"}
+  sessionCaptchaSiteKey?: string;
+  sessionId?: string;
+  sessionExpiresAt?: string;
 }
 
 export interface ApiProductResult {
