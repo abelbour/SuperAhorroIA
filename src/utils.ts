@@ -238,3 +238,17 @@ export function translateCategory(cat: string): string {
   const key = (cat || "").toLowerCase().trim();
   return mapping[key] || cat;
 }
+
+export function isProductVigente(p: Product, today: Date, freshnessDays: number): boolean {
+  if (p.archived) return false;
+  if (p.sourceType === "brochure" && p.endDate) {
+    return new Date(p.endDate) >= today;
+  }
+  if (p.sourceType === "receipt" || p.sourceType === "manual") {
+    const extracted = new Date(p.dateExtracted);
+    const limit = new Date(today);
+    limit.setDate(limit.getDate() - freshnessDays);
+    return extracted >= limit;
+  }
+  return true;
+}

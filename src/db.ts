@@ -354,6 +354,47 @@ class WebLocalStorageDB {
     this.setStorage("bp_price_alerts", this.getAlerts().filter(a => a.id !== id));
   }
 
+  clearAlerts() {
+    this.cache.delete("bp_price_alerts");
+    this.setStorage("bp_price_alerts", []);
+  }
+
+  clearUploads() {
+    this.cache.delete("bp_uploads");
+    this.setStorage("bp_uploads", []);
+  }
+
+  clearSavedLists() {
+    this.cache.delete("bp_saved_lists");
+    this.setStorage("bp_saved_lists", []);
+  }
+
+  clearCatalogSources() {
+    this.cache.delete("bp_catalog_sources");
+    this.setStorage("bp_catalog_sources", []);
+  }
+
+  getAllKeys(): string[] {
+    return Object.keys(localStorage).filter(k => k.startsWith("bp_")).sort();
+  }
+
+  getFreshnessDays(): number {
+    const v = localStorage.getItem("bp_freshness_days");
+    return v ? parseInt(v, 10) : 15;
+  }
+
+  saveFreshnessDays(days: number) {
+    localStorage.setItem("bp_freshness_days", String(Math.max(1, days)));
+  }
+
+  getShowActiveOnly(): boolean {
+    return localStorage.getItem("bp_show_active_only") !== "false";
+  }
+
+  saveShowActiveOnly(val: boolean) {
+    localStorage.setItem("bp_show_active_only", String(val));
+  }
+
   // Old data cleanup (migration from previous versions)
   clearOldData() {
     this.cache.clear();

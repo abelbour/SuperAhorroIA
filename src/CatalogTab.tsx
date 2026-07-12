@@ -1,8 +1,9 @@
 import React, { useMemo, useState, useEffect } from "react";
-import { Store, Upload, Search, Globe, RefreshCw, Plus, Trash, TrendingUp, ShoppingCart, Info, Bell } from "lucide-react";
+import { Store, Upload, Search, Globe, RefreshCw, Plus, Trash, TrendingUp, ShoppingCart, Info, Bell, Eye, EyeOff } from "lucide-react";
 import { motion } from "motion/react";
 import { Product, ApiProductResult } from "./types";
-import { formatUnitPrice, translateCategory } from "./utils";
+import { formatUnitPrice, translateCategory, isProductVigente } from "./utils";
+import { db } from "./db";
 import DebouncedInput from "./DebouncedInput";
 
 interface CatalogTabProps {
@@ -41,7 +42,7 @@ interface CatalogTabProps {
   addToShoppingList: (product: Product) => void;
   handleAddApiProductToCatalog: (item: ApiProductResult) => void;
   handleAddAllApiProductsToCatalog: () => void;
-  setActiveTab: (tab: "home" | "upload" | "catalog" | "shopping" | "settings" | "scan" | "receipts") => void;
+  setActiveTab: (tab: "home" | "upload" | "catalog" | "shopping" | "settings" | "scan" | "receipts" | "inflation" | "data") => void;
   onCreateAlert: (productName: string, currentPrice: number) => void;
 }
 
@@ -85,6 +86,8 @@ const CatalogTab = React.memo(function CatalogTab({
 }: CatalogTabProps) {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [showActiveOnly, setShowActiveOnly] = useState(db.getShowActiveOnly());
+  const freshnessDays = db.getFreshnessDays();
   useEffect(() => { setPage(1); }, [searchQuery, categoryFilter, supermarketFilter, dateFrom, dateTo, sortBy]);
 
   const filteredProducts = useMemo(() => {
@@ -117,6 +120,10 @@ const CatalogTab = React.memo(function CatalogTab({
     if (dateTo) {
       list = list.filter(p => !p.startDate || new Date(p.startDate) <= new Date(dateTo));
     }
+    if (showActiveOnly) {
+      const today = new Date();
+      list = list.filter(p => isProductVigente(p, today, freshnessDays));
+    }
     list.sort((a, b) => {
       if (sortBy === "name") return a.name.localeCompare(b.name);
       if (sortBy === "price_asc") return a.salePrice - b.salePrice;
@@ -125,7 +132,7 @@ const CatalogTab = React.memo(function CatalogTab({
       return 0;
     });
     return list;
-  }, [products, searchQuery, categoryFilter, supermarketFilter, sortBy, dateFrom, dateTo]);
+  }, [products, searchQuery, categoryFilter, supermarketFilter, sortBy, dateFrom, dateTo, showActiveOnly, freshnessDays]);
 
   const ITEMS_PER_PAGE = 30;
   const [page, setPage] = useState(1);
@@ -262,6 +269,18 @@ const CatalogTab = React.memo(function CatalogTab({
                 <option value="price_desc">Precio: mayor a menor</option>
                 <option value="unitprice_asc">Precio unitario: menor a mayor</option>
               </select>
+              <button
+                onClick={() => { const v = !showActiveOnly; setShowActiveOnly(v); db.saveShowActiveOnly(v); }}
+                className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl border text-xs font-medium transition shrink-0 ${
+                  showActiveOnly
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                    : 'bg-slate-50 border-slate-200 text-slate-500'
+                }`}
+                title={showActiveOnly ? "Mostrando solo productos vigentes" : "Mostrando todos los productos"}
+              >
+                {showActiveOnly ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                {showActiveOnly ? "Solo vigentes" : "Todos"}
+              </button>
             </div>
 
             {/* Online Product Search */}
@@ -389,6 +408,12 @@ const CatalogTab = React.memo(function CatalogTab({
                           if (lowest != null && product.salePrice <= lowest) {
                             return <span className="ml-1.5 inline-block bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-semibold">Mejor precio</span>;
                           }
+                          return null;
+                        })()}
+                        {(() => {
+                          if (product.archived) return <span className="ml-1.5 inline-block bg-slate-200 text-slate-500 px-1.5 py-0.5 rounded">Archivado</span>;
+                          if (product.sourceType === "brochure" && product.endDate && new Date(product.endDate) < new Date()) return <span className="ml-1.5 inline-block bg-rose-100 text-rose-600 px-1.5 py-0.5 rounded font-semibold text-[10px]">Vencido</span>;
+                          if ((product.sourceType === "receipt" || product.sourceType === "manual") && !isProductVigente(product, new Date(), freshnessDays)) return <span className="ml-1.5 inline-block bg-amber-100 text-amber-600 px-1.5 py-0.5 rounded text-[10px]">Histórico</span>;
                           return null;
                         })()}
                       </p>

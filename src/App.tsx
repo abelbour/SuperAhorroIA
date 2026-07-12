@@ -85,6 +85,7 @@ import CatalogTab from "./CatalogTab";
 import ScanTab from "./ScanTab";
 import ConfirmDialog from "./ConfirmDialog";
 import ShoppingListTab from "./ShoppingListTab";
+import DataManagerTab from "./DataManagerTab";
 
 export default function App() {
   // Shared States
@@ -95,7 +96,7 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState<string>(db.getSelectedModel());
   const [discoveredModels, setDiscoveredModels] = useState<Array<{name: string, displayName: string}>>(db.getDiscoveredModels());
   const [isUpdatingModels, setIsUpdatingModels] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<"home" | "upload" | "catalog" | "shopping" | "settings" | "scan" | "receipts" | "inflation">("home");
+  const [activeTab, setActiveTab] = useState<"home" | "upload" | "catalog" | "shopping" | "settings" | "scan" | "receipts" | "inflation" | "data">("home");
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
   const [darkMode, setDarkMode] = useState<boolean>(() => localStorage.getItem("bp_dark_mode") === "true");
@@ -2706,6 +2707,23 @@ export default function App() {
             {(!sidebarCollapsed || mobileMenuOpen) && <span>Inflación</span>}
           </button>
 
+          {/* Opción Gestor de Datos */}
+          <button
+            onClick={() => {
+              setActiveTab("data");
+              setMobileMenuOpen(false);
+            }}
+            className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl transition text-sm font-medium ${
+              activeTab === "data"
+                ? "bg-sky-500/10 text-sky-400 border border-sky-500/20"
+                : "hover:bg-slate-800 text-slate-400 hover:text-white border border-transparent"
+            }`}
+            title="Gestor de Base de Datos"
+          >
+            <Database className="w-4 h-4 shrink-0" />
+            {(!sidebarCollapsed || mobileMenuOpen) && <span>Gestor de Datos</span>}
+          </button>
+
           {/* Opción Ajustes */}
           <button
             onClick={() => {
@@ -3480,6 +3498,20 @@ export default function App() {
             <InflationTab products={products} receiptsCount={receipts.length} />
           )}
 
+          {/* TAB: DATA MANAGER */}
+          {activeTab === "data" && (
+            <DataManagerTab
+              products={products}
+              setProducts={setProducts}
+              receipts={receipts}
+              setReceipts={setReceipts}
+              shoppingList={shoppingList}
+              setShoppingList={setShoppingList}
+              triggerSuccess={triggerSuccess}
+              triggerError={triggerError}
+            />
+          )}
+
           {/* TAB 3: SHOPPING LIST & BUDGET OPTIMIZER */}
           {activeTab === "shopping" && (
             <ShoppingListTab
@@ -4159,6 +4191,22 @@ export default function App() {
                     </div>
                   );
                 })()}
+              </div>
+
+              {/* Vigencia de productos */}
+              <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col gap-3">
+                <div className="flex items-center gap-2">
+                  <Calendar className="w-5 h-5 text-sky-500" />
+                  <h3 className="text-base font-bold text-slate-800">Vigencia de Productos</h3>
+                </div>
+                <p className="text-xs text-slate-500">Días durante los cuales un producto de ticket o manual se considera vigente.</p>
+                <div className="flex items-center gap-3">
+                  <input type="number" min="1" max="365" step="1"
+                    defaultValue={db.getFreshnessDays()}
+                    onChange={(e) => db.saveFreshnessDays(parseInt(e.target.value) || 15)}
+                    className="w-20 px-3 py-2 text-xs border border-slate-200 rounded-xl focus:border-sky-500 focus:outline-none" />
+                  <span className="text-xs text-slate-400">días</span>
+                </div>
               </div>
 
               {/* Alertas de precio */}

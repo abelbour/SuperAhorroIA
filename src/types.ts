@@ -20,6 +20,7 @@ export interface Product {
   startDate?: string; // YYYY-MM-DD
   endDate?: string;   // YYYY-MM-DD
   uploadId?: string;  // Links to BroshureUpload.id for safe deletion
+  archived?: boolean;
 }
 
 export interface ReceiptItem {
