@@ -19,6 +19,7 @@ export interface Product {
   sourceType: "brochure" | "online" | "manual" | "receipt";
   startDate?: string; // YYYY-MM-DD
   endDate?: string;   // YYYY-MM-DD
+  uploadId?: string;  // Links to BroshureUpload.id for safe deletion
 }
 
 export interface ReceiptItem {
@@ -55,13 +56,12 @@ export interface ShoppingListItem {
   notes?: string;
 }
 
-export interface PriceHistoryRecord {
+export interface SavedList {
   id: string;
-  productName: string;
-  supermarket: string;
-  price: number;
-  unitPrice: number;
+  name: string;
   date: string;
+  total: number;
+  items: ShoppingListItem[];
 }
 
 export interface BroshureUpload {
@@ -72,20 +72,6 @@ export interface BroshureUpload {
   status: "processing" | "completed" | "failed";
   itemCount: number;
   errorMessage?: string;
-}
-
-export interface OnlineStore {
-  id: string;
-  name: string;
-  isOnlineOnly: boolean;
-  websiteUrl?: string;
-  catalogItems: Array<{
-    name: string;
-    category: string;
-    price: number;
-    amount: number;
-    unit: string;
-  }>;
 }
 
 export interface CatalogSource {
@@ -141,6 +127,18 @@ export interface ApiProductResult {
   discountsAndDeals: string;
   sourceUrl?: string;
   category?: string;
+}
+
+export interface PriceAlert {
+  id: string;
+  productName: string;
+  productId: string; // matches Product.id, can be empty if user typed a name manually
+  supermarket?: string; // optional, if the user wants a specific store
+  targetPrice: number;
+  currentBestPrice: number;
+  active: boolean;
+  createdAt: string;
+  lastTriggeredAt?: string;
 }
 
 export interface StoreAnalysisResult {

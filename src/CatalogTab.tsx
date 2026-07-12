@@ -1,8 +1,8 @@
-import React, { useMemo } from "react";
-import { Store, Upload, Search, Globe, RefreshCw, Plus, Trash, TrendingUp, ShoppingCart, Info } from "lucide-react";
+import React, { useMemo, useState, useEffect } from "react";
+import { Store, Upload, Search, Globe, RefreshCw, Plus, Trash, TrendingUp, ShoppingCart, Info, Bell } from "lucide-react";
 import { motion } from "motion/react";
 import { Product, ApiProductResult } from "./types";
-import { formatUnitPrice, translateCategory, findSimilarOnlineProducts } from "./utils";
+import { formatUnitPrice, translateCategory } from "./utils";
 import DebouncedInput from "./DebouncedInput";
 
 interface CatalogTabProps {
@@ -42,6 +42,7 @@ interface CatalogTabProps {
   handleAddApiProductToCatalog: (item: ApiProductResult) => void;
   handleAddAllApiProductsToCatalog: () => void;
   setActiveTab: (tab: "home" | "upload" | "catalog" | "shopping" | "settings" | "scan" | "receipts") => void;
+  onCreateAlert: (productName: string, currentPrice: number) => void;
 }
 
 const CatalogTab = React.memo(function CatalogTab({
@@ -80,7 +81,10 @@ const CatalogTab = React.memo(function CatalogTab({
   handleAddApiProductToCatalog,
   handleAddAllApiProductsToCatalog,
   setActiveTab,
+  onCreateAlert,
 }: CatalogTabProps) {
+  useEffect(() => { setPage(1); }, [searchQuery, categoryFilter, supermarketFilter, dateFrom, dateTo, sortBy]);
+
   const filteredProducts = useMemo(() => {
     const latestItemsMap: { [key: string]: Product } = {};
     products.forEach(p => {
@@ -105,6 +109,12 @@ const CatalogTab = React.memo(function CatalogTab({
     if (supermarketFilter !== "All") {
       list = list.filter(p => p.supermarket === supermarketFilter);
     }
+    if (dateFrom) {
+      list = list.filter(p => !p.endDate || new Date(p.endDate) >= new Date(dateFrom));
+    }
+    if (dateTo) {
+      list = list.filter(p => !p.startDate || new Date(p.startDate) <= new Date(dateTo));
+    }
     list.sort((a, b) => {
       if (sortBy === "name") return a.name.localeCompare(b.name);
       if (sortBy === "price_asc") return a.salePrice - b.salePrice;
@@ -113,7 +123,15 @@ const CatalogTab = React.memo(function CatalogTab({
       return 0;
     });
     return list;
-  }, [products, searchQuery, categoryFilter, supermarketFilter, sortBy]);
+  }, [products, searchQuery, categoryFilter, supermarketFilter, sortBy, dateFrom, dateTo]);
+
+  const ITEMS_PER_PAGE = 30;
+  const [page, setPage] = useState(1);
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / ITEMS_PER_PAGE));
+  const safePage = Math.min(page, totalPages);
+  const paginatedProducts = filteredProducts.slice((safePage - 1) * ITEMS_PER_PAGE, safePage * ITEMS_PER_PAGE);
 
   const productPriceHistory = useMemo(() => {
     if (!selectedCompareProduct) return [];
@@ -130,8 +148,30 @@ const CatalogTab = React.memo(function CatalogTab({
 
   const catalogComparisons = useMemo(() => {
     if (!selectedCompareProduct) return [];
-    return findSimilarOnlineProducts(selectedCompareProduct.name, selectedCompareProduct.category);
-  }, [selectedCompareProduct]);
+    const name = selectedCompareProduct.name.toLowerCase().trim();
+    return products
+      .filter(p => p.name.toLowerCase().trim() !== name && p.name.toLowerCase().includes(name))
+      .map(p => ({
+        storeName: p.supermarket,
+        productName: p.name,
+        price: p.salePrice,
+        amount: p.amount,
+        unit: p.unit,
+        unitPrice: p.unitPrice,
+        baseUnit: p.baseUnit || p.unit,
+      }));
+  }, [selectedCompareProduct, products]);
+
+  const lowestPrices = useMemo(() => {
+    const map: Record<string, number> = {};
+    products.forEach(p => {
+      const key = p.name.toLowerCase().trim();
+      if (!(key in map) || p.salePrice < map[key]) {
+        map[key] = p.salePrice;
+      }
+    });
+    return map;
+  }, [products]);
 
   return (
     <motion.div
@@ -181,7 +221,7 @@ const CatalogTab = React.memo(function CatalogTab({
                 onChange={(e) => setCategoryFilter(e.target.value)}
                 className="px-3 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-hidden focus:ring-2 focus:ring-sky-500/30 transition"
               >
-                <option value="All">All Categories</option>
+                <option value="All">Todas las Categorías</option>
                 {Array.from(new Set(products.map(p => p.category))).map(cat => (
                   <option key={cat} value={cat}>{cat}</option>
                 ))}
@@ -192,21 +232,35 @@ const CatalogTab = React.memo(function CatalogTab({
                 onChange={(e) => setSupermarketFilter(e.target.value)}
                 className="px-3 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-hidden focus:ring-2 focus:ring-sky-500/30 transition"
               >
-                <option value="All">All Stores</option>
+                <option value="All">Todos los Supermercados</option>
                 {uniqueSupermarkets.map(s => (
                   <option key={s} value={s}>{s}</option>
                 ))}
               </select>
 
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="px-2 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-xs focus:outline-hidden focus:ring-2 focus:ring-sky-500/30 transition"
+                title="Ofertas desde"
+              />
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="px-2 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-xs focus:outline-hidden focus:ring-2 focus:ring-sky-500/30 transition"
+                title="Ofertas hasta"
+              />
               <select
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value as any)}
                 className="px-3 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-sm focus:outline-hidden focus:ring-2 focus:ring-sky-500/30 transition"
               >
-                <option value="name">Name A-Z</option>
-                <option value="price_asc">Price: Low to High</option>
-                <option value="price_desc">Price: High to Low</option>
-                <option value="unitprice_asc">Unit Price: Low to High</option>
+                <option value="name">Nombre A-Z</option>
+                <option value="price_asc">Precio: menor a mayor</option>
+                <option value="price_desc">Precio: mayor a menor</option>
+                <option value="unitprice_asc">Precio unitario: menor a mayor</option>
               </select>
             </div>
 
@@ -291,8 +345,9 @@ const CatalogTab = React.memo(function CatalogTab({
                   <p className="text-sm text-slate-500">No hay productos que coincidan con los filtros actuales.</p>
                 </div>
               ) : (
+                <>
                 <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-                  {filteredProducts.map(product => (
+                  {paginatedProducts.map(product => (
                     <div
                       key={product.id}
                       className={`bg-white rounded-2xl border shadow-sm p-4 transition cursor-pointer
@@ -303,16 +358,23 @@ const CatalogTab = React.memo(function CatalogTab({
                         <h4 className="text-sm font-bold text-slate-800 leading-tight line-clamp-2">{product.name}</h4>
                         <div className="flex items-center gap-1 shrink-0">
                           <button
+                            onClick={(e) => { e.stopPropagation(); onCreateAlert(product.name, product.salePrice); }}
+                            className="p-1.5 text-amber-500 hover:bg-amber-50 rounded-lg transition active:scale-90"
+                            title="Crear alerta de precio"
+                          >
+                            <Bell className="w-3.5 h-3.5" />
+                          </button>
+                          <button
                             onClick={(e) => { e.stopPropagation(); addToShoppingList(product); }}
                             className="p-1.5 text-sky-500 hover:bg-sky-50 rounded-lg transition active:scale-90"
-                            title="Add to Shopping List"
+                            title="Agregar a la lista"
                           >
                             <ShoppingCart className="w-3.5 h-3.5" />
                           </button>
                           <button
                             onClick={(e) => { e.stopPropagation(); deleteProduct(product.id); }}
                             className="p-1.5 text-rose-400 hover:bg-rose-50 rounded-lg transition active:scale-90"
-                            title="Delete from catalog"
+                            title="Eliminar del catálogo"
                           >
                             <Trash className="w-3.5 h-3.5" />
                           </button>
@@ -322,6 +384,13 @@ const CatalogTab = React.memo(function CatalogTab({
                       <p className="text-[10px] text-slate-400 mb-2">
                         <span className="inline-block bg-slate-100 px-1.5 py-0.5 rounded">{translateCategory(product.category)}</span>
                         <span className="ml-1.5">{product.supermarket}</span>
+                        {(() => {
+                          const lowest = lowestPrices[product.name.toLowerCase().trim()];
+                          if (lowest != null && product.salePrice <= lowest) {
+                            return <span className="ml-1.5 inline-block bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-semibold">Mejor precio</span>;
+                          }
+                          return null;
+                        })()}
                       </p>
 
                       <div className="flex items-baseline gap-2 mb-0.5">
@@ -340,6 +409,38 @@ const CatalogTab = React.memo(function CatalogTab({
                     </div>
                   ))}
                 </div>
+                {totalPages > 1 && (
+                  <div className="flex items-center justify-center gap-2 mt-4 text-xs">
+                    <button
+                      onClick={() => setPage(p => Math.max(1, p - 1))}
+                      disabled={safePage <= 1}
+                      className="px-3 py-1.5 rounded-lg border border-slate-200 disabled:opacity-30 hover:bg-slate-50 transition"
+                    >
+                      Anterior
+                    </button>
+                    {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
+                      <button
+                        key={p}
+                        onClick={() => setPage(p)}
+                        className={`px-3 py-1.5 rounded-lg border transition ${
+                          p === safePage
+                            ? 'bg-sky-600 text-white border-sky-600'
+                            : 'border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                      disabled={safePage >= totalPages}
+                      className="px-3 py-1.5 rounded-lg border border-slate-200 disabled:opacity-30 hover:bg-slate-50 transition"
+                    >
+                      Siguiente
+                    </button>
+                  </div>
+                )}
+                </>
               )}
             </div>
 
@@ -416,10 +517,11 @@ const CatalogTab = React.memo(function CatalogTab({
                   {/* Online Catalog Comparisons */}
                   {catalogComparisons.length > 0 && (
                     <div>
-                      <div className="flex items-center gap-1.5 mb-2">
+                      <div className="flex items-center gap-1.5 mb-1">
                         <Globe className="w-3.5 h-3.5 text-sky-500" />
                         <span className="text-xs font-bold text-slate-600">Comparación Online ({catalogComparisons.length})</span>
                       </div>
+                      <p className="text-[10px] text-amber-600 mb-2">Precio de referencia — puede haber cambiado</p>
                       <div className="space-y-1.5 max-h-48 overflow-y-auto">
                         {catalogComparisons.map((cmp, i) => (
                           <div key={i} className="flex items-center justify-between px-2.5 py-2 bg-slate-50 rounded-xl border border-slate-100">

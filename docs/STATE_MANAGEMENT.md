@@ -2,7 +2,7 @@
 
 ## Pattern
 
-**Single-component state** in `App.tsx` using `useState` + `useEffect`. No external state library (Redux, Zustand, Context).
+**Single-component state** in `App.tsx` using `useState` + `useEffect`. No external state library (Redux, Zustand, Context). Notifications use a shared `useAlerts()` hook from `src/hooks/useAlerts.ts`.
 
 ## State Categories
 
@@ -26,6 +26,7 @@ const [searchQuery, setSearchQuery] = useState("");
 const [categoryFilter, setCategoryFilter] = useState("All");
 const [supermarketFilter, setSupermarketFilter] = useState("All");
 const [sortBy, setSortBy] = useState<...>("name");
+const [currentPage, setCurrentPage] = useState(1);  // resets on filter change in Catalog
 ```
 
 ### 3. Form / Editing State
@@ -70,12 +71,12 @@ const [gsheetsSSID, setGsheetsSSID] = useState("");
 const [gsheetsUrl, setGsheetsUrl] = useState("");
 ```
 
-### 6. Notifications
+### 6. Notifications (via `useAlerts()` hook)
 ```typescript
-const [errorMessage, setErrorMessage] = useState<string | null>(null);
-const [successMessage, setSuccessMessage] = useState<string | null>(null);
+const { triggerError, triggerSuccess, AlertsComponent } = useAlerts();
 ```
-- Auto-dismiss via `triggerError()` / `triggerSuccess()` helpers (4-6s timeout)
+- `triggerError(msg)` / `triggerSuccess(msg)` auto-dismiss after 4-6s
+- Rendered via `<AlertsComponent />` in the layout
 
 ### 7. Camera / Media
 ```typescript

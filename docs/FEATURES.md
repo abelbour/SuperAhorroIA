@@ -10,7 +10,7 @@
 | Shopping | `shopping` | Shopping list builder with suggestions |
 | Scan | `scan` | Camera scanning + API online price comparison |
 | Receipts | `receipts` | Receipt OCR + manual entry + history |
-| Settings | `settings` | API key, model, GSheets sync, custom URLs, API data sources, AI wizard |
+| Settings | `settings` | API key, model, GSheets sync, CORS proxies, API data sources, AI wizard |
 
 ---
 
@@ -34,7 +34,7 @@
 - Search by name
 - Filter by category, supermarket
 - Sort: name, price asc/desc, unit price asc
-- **Price History**: Click product → shows timeline chart across dates/stores
+- **Price History**: Click product → shows timeline chart across dates/stores (Sparkline memoized via `React.memo`)
 - **Unit Price Comparison**: Normalized to per kg / per L / per unit
 - **Best Offer Detection**: `getBestAvailableOffer()` checks brochures + online presets
 - **Online API Search**: Search any product across configured API data sources
@@ -52,7 +52,7 @@
 **Flow**:
 1. Start camera (environment-facing)
 2. Capture photo → canvas → base64
-3. Call `scanSinglePriceWithGemini()`
+3. Call `scanSinglePriceWithGemini()` with typed result (`SinglePriceScanResult | null`)
 4. Shows result with "Add to Catalog" button
 5. Online API comparison section: "Buscar en APIs Online" button
    - Searches the scanned product name across all enabled `ApiDataSource` sources
@@ -109,7 +109,7 @@
 - Enable/disable toggle per source
 - Pre-seeded with Mercado Libre Argentina API
 - Used by Catalog online search and Scan tab for real-time price comparison
-- Direct browser fetch with optional CORS proxy fallback
+- Direct browser fetch with configurable CORS proxy fallback (editable via textarea in Settings)
 
 **Storage**: `bp_api_data_sources` in localStorage
 
@@ -141,8 +141,18 @@
 
 ## 8. Demo Data & Reset
 
-- `loadDemoData()`: Seeds 3-week price history for 5 products across 2 stores
+- `loadDemoData()`: Seeds 3-week price history for 5 products across 2 stores with ARS prices in Argentine Spanish
 - `handleClearDb()`: Wipes all localStorage data
+
+---
+
+## 9. CORS Proxies (Settings Tab)
+
+- Toggle to enable/disable public CORS proxy fallback
+- Editable textarea with one proxy URL per line (`{url}` placeholder required)
+- Defaults: `https://corsproxy.io/?url={url}`, `https://api.allorigins.win/raw?url={url}`
+- Stored in `localStorage` under `bp_public_proxy_urls` (JSON array) and `bp_public_proxy_enabled`
+- Used automatically when direct fetch fails for API data sources
 
 ---
 
@@ -152,4 +162,5 @@
 - `formatUnitPrice()`: ARS formatting (es-AR locale)
 - `convertToCSV()`: Export for Google Sheets
 - `translateCategory()`: English → Spanish categories
-- `findSimilarOnlineProducts()`: Matches against preset catalogs (currently empty)
+- `getPublicProxies()`: Reads configurable proxy list from localStorage
+- `setPublicProxies()`: Writes custom proxy list to localStorage

@@ -1,9 +1,9 @@
-import React from "react";
-import { ShoppingCart, Check, Store, Sparkles, Trash, Calculator, Plus } from "lucide-react";
+import React, { useState } from "react";
+import { ShoppingCart, Check, Store, Sparkles, Trash, Calculator, Plus, Printer } from "lucide-react";
 import { motion } from "motion/react";
-import { ShoppingListItem } from "./types";
+import { ShoppingListItem, SavedList } from "./types";
 import { ShoppingListSuggestion } from "./gemini";
-import { formatUnitPrice } from "./utils";
+import { formatUnitPrice, getUnitNormalization } from "./utils";
 import { db } from "./db";
 
 interface ShoppingListTabProps {
@@ -41,6 +41,11 @@ const ShoppingListTab = React.memo(function ShoppingListTab({
   setShoppingList,
   triggerSuccess,
 }: ShoppingListTabProps) {
+  const [savedListVersion, setSavedListVersion] = useState(0);
+  const savedLists: SavedList[] = db.getSavedLists();
+
+  const refreshSavedLists = () => setSavedListVersion(v => v + 1);
+
   return (
     <motion.div
       key="shopping-tab"
@@ -65,12 +70,73 @@ const ShoppingListTab = React.memo(function ShoppingListTab({
               )}
             </div>
             {shoppingList.length > 0 && (
-              <button
-                onClick={clearList}
-                className="text-[11px] font-semibold text-rose-400 hover:text-rose-600 bg-rose-50 hover:bg-rose-100 px-3 py-1.5 rounded-lg transition"
-              >
-                Vaciar Lista
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    db.saveSavedList({
+                      id: `saved-${Date.now()}`,
+                      name: `Lista ${new Date().toLocaleDateString()}`,
+                      date: new Date().toISOString(),
+                      total: shoppingList.reduce((s, i) => s + i.price * i.quantity, 0),
+                      items: [...shoppingList],
+                    });
+                    refreshSavedLists();
+                    triggerSuccess("Lista guardada.");
+                  }}
+                  className="text-[11px] font-semibold text-sky-500 hover:text-sky-600 bg-sky-50 hover:bg-sky-100 px-3 py-1.5 rounded-lg transition"
+                >
+                  Guardar Lista
+                </button>
+                <button
+                  onClick={() => {
+                    const itemsHtml = shoppingList.map(item => `
+                      <tr>
+                        <td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:12px">${item.checked ? '✓' : ''} ${item.name}</td>
+                        <td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:12px">${item.supermarket}</td>
+                        <td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:12px;text-align:right">${item.quantity}</td>
+                        <td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:12px;text-align:right">$${item.price.toFixed(2)}</td>
+                        <td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:12px;text-align:right">$${(item.price * item.quantity).toFixed(2)}</td>
+                      </tr>
+                    `).join('');
+                    const total = shoppingList.reduce((s, i) => s + i.price * i.quantity, 0);
+                    const win = window.open('', '_blank');
+                    if (win) {
+                      win.document.write(`
+                        <html><head><title>Lista de Compras</title>
+                        <style>
+                          body { font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: auto; }
+                          h1 { font-size: 18px; color: #1e293b; }
+                          table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+                          th { background: #f1f5f9; text-align: left; padding: 8px; font-size: 11px; text-transform: uppercase; color: #64748b; }
+                          .total { font-weight: bold; font-size: 14px; margin-top: 12px; text-align: right; }
+                          @media print { body { padding: 0; } }
+                        </style></head><body>
+                        <h1>🛒 Lista de Compras</h1>
+                        <p style="font-size:12px;color:#64748b">${new Date().toLocaleDateString()} · ${shoppingList.length} artículos</p>
+                        <table>
+                          <tr><th>Producto</th><th>Supermercado</th><th style="text-align:right">Cant</th><th style="text-align:right">Precio</th><th style="text-align:right">Subtotal</th></tr>
+                          ${itemsHtml}
+                        </table>
+                        <p class="total">Total: $${total.toFixed(2)}</p>
+                        <p style="font-size:10px;color:#94a3b8;margin-top:20px">Generado por SuperAhorroIA</p>
+                        <script>window.print()</script>
+                        </body></html>
+                      `);
+                      win.document.close();
+                    }
+                  }}
+                  className="text-[11px] font-semibold text-slate-500 hover:text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg transition flex items-center gap-1"
+                >
+                  <Printer className="w-3 h-3" />
+                  PDF
+                </button>
+                <button
+                  onClick={clearList}
+                  className="text-[11px] font-semibold text-rose-400 hover:text-rose-600 bg-rose-50 hover:bg-rose-100 px-3 py-1.5 rounded-lg transition"
+                >
+                  Vaciar Lista
+                </button>
+              </div>
             )}
           </div>
 
@@ -140,12 +206,13 @@ const ShoppingListTab = React.memo(function ShoppingListTab({
                                 </span>
                                 <button
                                   onClick={() => {
-                                    const norm = { multiplier: 1, baseUnit: item.unit };
+                                    const norm = getUnitNormalization(item.amount || 1, item.unit);
                                     const updatedItem = {
                                       ...item,
                                       price: bestOffer.price,
                                       supermarket: bestOffer.supermarket,
                                       unitPrice: bestOffer.price * norm.multiplier,
+                                      baseUnit: norm.baseUnit,
                                     };
                                     db.saveShoppingListItem(updatedItem);
                                     setShoppingList(db.getShoppingList());
@@ -188,6 +255,46 @@ const ShoppingListTab = React.memo(function ShoppingListTab({
               ))}
             </div>
           )}
+
+          {/* Saved Lists */}
+          <details key={savedListVersion} className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            <summary className="px-4 py-3 text-xs font-bold text-slate-600 cursor-pointer hover:bg-slate-50 flex items-center gap-2">
+              <Store className="w-3.5 h-3.5 text-sky-500" />
+              Listas Guardadas ({savedLists.length})
+            </summary>
+            <div className="px-4 pb-3 space-y-2 max-h-48 overflow-y-auto">
+              {savedLists.length === 0 ? (
+                <p className="text-[10px] text-slate-400 py-2">No hay listas guardadas. Guardá tu lista actual para volver a usarla después.</p>
+              ) : (
+                savedLists.map((sl) => (
+                  <div key={sl.id} className="flex items-center justify-between py-1.5 border-b border-slate-100 last:border-0">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-slate-700 truncate">{sl.name}</p>
+                      <p className="text-[10px] text-slate-400">{sl.items.length} artículos · ${sl.total.toFixed(2)}</p>
+                    </div>
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => {
+                          db.saveShoppingList(sl.items);
+                          setShoppingList(sl.items);
+                          triggerSuccess(`Lista "${sl.name}" cargada.`);
+                        }}
+                        className="text-[10px] text-sky-600 hover:text-sky-800 font-semibold px-2 py-1 rounded hover:bg-sky-50 transition"
+                      >
+                        Cargar
+                      </button>
+                      <button
+                        onClick={() => { db.deleteSavedList(sl.id); refreshSavedLists(); }}
+                        className="text-[10px] text-rose-400 hover:text-rose-600 font-semibold px-2 py-1 rounded hover:bg-rose-50 transition"
+                      >
+                        Eliminar
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </details>
         </div>
 
         {/* Budget Optimizer Column */}
@@ -223,7 +330,7 @@ const ShoppingListTab = React.memo(function ShoppingListTab({
                       />
                     </div>
                     <p className="text-[10px] text-slate-400">
-                      SAVE {shoppingOptimization.splitSavingsPct.toFixed(0)}% comprando cada producto donde esté más barato.
+                      Ahorrá {shoppingOptimization.splitSavingsPct.toFixed(0)}% comprando cada producto donde esté más barato.
                     </p>
                   </>
                 )}

@@ -1,18 +1,22 @@
+# SuperAhorro IA
 
-# Run and deploy your AI Studio app
+Aplicación PWA para extraer precios de supermercados desde volantes/tickets usando Google Gemini IA, comparar precios unitarios entre tiendas y generar listas de compras optimizadas.
 
-This contains everything you need to run your app locally.
+## Documentación
 
-View your app in AI Studio: https://ai.studio/apps/bbb69220-7d79-46b3-9112-b04166b4f8d0
+- [Arquitectura](docs/ARCHITECTURE.md)
+- [Modelos de Datos](docs/DATA_MODELS.md)
+- [Funcionalidades](docs/FEATURES.md)
+- [Servicios de IA](docs/SERVICES.md)
+- [Base de Datos](docs/DATABASE.md)
+- [Estado](docs/STATE_MANAGEMENT.md)
+- [Despliegue](docs/DEPLOYMENT.md)
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
+**Prerequisites:** Node.js
 
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+1. `npm install`
+2. Set `GEMINI_API_KEY` in `.env.local`
+3. `npm run dev`
  

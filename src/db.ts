@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Product, ShoppingListItem, BroshureUpload, CatalogSource, Receipt } from "./types";
+import { Product, ShoppingListItem, SavedList, BroshureUpload, CatalogSource, Receipt, PriceAlert } from "./types";
 
 const DB_NAME = "brochure_planner_db";
 const DB_VERSION = 1;
@@ -17,19 +17,31 @@ interface AppData {
 
 // Fallback memory state + localStorage helper
 class WebLocalStorageDB {
+  private cache = new Map<string, any>();
+
   private getStorage<T>(key: string, defValue: T): T {
+    if (this.cache.has(key)) return this.cache.get(key) as T;
     try {
       const data = localStorage.getItem(key);
-      return data ? JSON.parse(data) : defValue;
+      const parsed = data ? JSON.parse(data) : defValue;
+      this.cache.set(key, parsed);
+      return parsed;
     } catch {
       return defValue;
     }
   }
 
   private setStorage(key: string, value: any) {
+    this.cache.set(key, value);
     try {
       localStorage.setItem(key, JSON.stringify(value));
-    } catch (e) {
+    } catch (e: any) {
+      if (e?.name === "QuotaExceededError" || e?.code === 22) {
+        const size = new Blob([JSON.stringify(value)]).size;
+        const msg = `El almacenamiento local está lleno. No se pudieron guardar ${(size / 1024).toFixed(0)}KB de datos. Exportá tus datos y liberá espacio.`;
+        console.error(msg);
+        throw new Error(msg);
+      }
       console.error("LocalStorage save failed", e);
     }
   }
@@ -63,6 +75,7 @@ class WebLocalStorageDB {
   }
 
   clearAllProducts() {
+    this.cache.delete("bp_products");
     this.setStorage("bp_products", []);
   }
 
@@ -84,7 +97,29 @@ class WebLocalStorageDB {
   }
 
   clearShoppingList() {
+    this.cache.delete("bp_shopping_list");
     this.setStorage("bp_shopping_list", []);
+  }
+
+  saveShoppingList(list: ShoppingListItem[]) {
+    this.setStorage("bp_shopping_list", list);
+  }
+
+  getSavedLists(): SavedList[] {
+    return this.getStorage<SavedList[]>("bp_saved_lists", []);
+  }
+
+  saveSavedList(list: SavedList) {
+    const lists = this.getSavedLists();
+    const idx = lists.findIndex(l => l.id === list.id);
+    if (idx >= 0) lists[idx] = list;
+    else lists.unshift(list);
+    this.setStorage("bp_saved_lists", lists);
+  }
+
+  deleteSavedList(id: string) {
+    const lists = this.getSavedLists().filter(l => l.id !== id);
+    this.setStorage("bp_saved_lists", lists);
   }
 
   getUploads(): BroshureUpload[] {
@@ -215,6 +250,18 @@ class WebLocalStorageDB {
           apiDefaultCategory: "Other",
           salesChannel: "1",
         },
+        {
+          id: "cat-preciosclaros",
+          name: "Precios Claros (Gob. ARS)",
+          description: "Base de datos oficial de precios de supermercados del gobierno argentino. API pública sin auth.",
+          websiteUrl: "https://preciosclaros.gob.ar",
+          searchUrlTemplate: "https://preciosclaros.gob.ar/Home/Resultados?busqueda={producto}",
+          siteSearchEnabled: true,
+          searchMethod: "api",
+          apiMethod: "GET",
+          apiUrl: "https://preciosclaros.gob.ar/webservice/precios/producto/buscar?busqueda={producto}",
+          apiDefaultCategory: "Other",
+        },
       ];
       this.setStorage("bp_catalog_sources", defaultPresets);
       localStorage.setItem("bp_catalog_sources_seeded", "true");
@@ -238,11 +285,14 @@ class WebLocalStorageDB {
   }
 
   getApiKey(): string {
-    return localStorage.getItem("bp_gemini_api_key") || "";
+    const stored = localStorage.getItem("bp_gemini_api_key") || "";
+    if (!stored) return "";
+    try { return atob(stored); } catch { return stored; }
   }
 
   saveApiKey(key: string) {
-    localStorage.setItem("bp_gemini_api_key", key || "");
+    const encoded = key ? btoa(key) : "";
+    localStorage.setItem("bp_gemini_api_key", encoded);
   }
 
   getSelectedModel(): string {
@@ -284,11 +334,29 @@ class WebLocalStorageDB {
   }
 
   clearReceipts() {
+    this.cache.delete("bp_receipts");
     this.setStorage("bp_receipts", []);
+  }
+
+  getAlerts(): PriceAlert[] {
+    return this.getStorage<PriceAlert[]>("bp_price_alerts", []);
+  }
+
+  saveAlert(alert: PriceAlert) {
+    const alerts = this.getAlerts();
+    const idx = alerts.findIndex(a => a.id === alert.id);
+    if (idx >= 0) alerts[idx] = alert;
+    else alerts.push(alert);
+    this.setStorage("bp_price_alerts", alerts);
+  }
+
+  deleteAlert(id: string) {
+    this.setStorage("bp_price_alerts", this.getAlerts().filter(a => a.id !== id));
   }
 
   // Old data cleanup (migration from previous versions)
   clearOldData() {
+    this.cache.clear();
     localStorage.removeItem("bp_custom_search_urls");
     localStorage.removeItem("bp_api_data_sources");
     localStorage.removeItem("bp_search_urls_seeded");

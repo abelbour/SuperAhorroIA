@@ -6,6 +6,10 @@
 **Class**: `WebLocalStorageDB`  
 **Instance**: `export const db = new WebLocalStorageDB()`
 
+### Memory Cache
+
+`WebLocalStorageDB` maintains an in-memory `Map<string, string>` cache. On `get*()` calls, the raw JSON string is cached after first read; subsequent reads within the same session hit the cache and avoid `localStorage.getItem()` serialization overhead. The cache is invalidated on any `save*()` / `delete*()` call for the corresponding key.
+
 ## Storage Keys
 
 | Key | Type | Description |
@@ -22,6 +26,8 @@
 | `bp_gsheets_enabled` | `string` | "true"/"false" |
 | `bp_gsheets_ssid` | `string` | Google Sheet ID |
 | `bp_gsheets_url` | `string` | GAS Web App URL |
+| `bp_public_proxy_enabled` | `string` | "true"/"false" — enable CORS proxy fallback |
+| `bp_public_proxy_urls` | `string` (JSON array) | Custom CORS proxy URL list |
 
 ## CRUD Operations
 

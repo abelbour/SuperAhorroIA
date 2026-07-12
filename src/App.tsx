@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useAlerts } from "./useAlerts";
 import {
   Search,
   Upload,
@@ -42,21 +43,26 @@ import {
   ChevronRight,
   Home,
   LayoutDashboard,
-  Receipt as ReceiptIcon
+  Receipt as ReceiptIcon,
+  Bell,
+  AlertTriangle,
+  Calculator as CalcIcon
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { Product, ShoppingListItem, BroshureUpload, CatalogSource, Receipt, ReceiptItem, ApiProductResult, StoreAnalysisResult } from "./types";
+import InflationTab from "./InflationTab";
+import { Product, ShoppingListItem, BroshureUpload, CatalogSource, Receipt, ReceiptItem, ApiProductResult, StoreAnalysisResult, PriceAlert } from "./types";
 import { db } from "./db";
 import {
   getUnitNormalization,
   formatUnitPrice,
   convertToCSV,
-  presetOnlineStores,
-  findSimilarOnlineProducts,
+  parseCSV,
   translateCategory,
-  cleanHtmlForGemini
+  cleanHtmlForGemini,
+  getPublicProxies
 } from "./utils";
 import { 
+  fileToBase64,
   parseBrochureWithGemini, 
   normalizeExtractedItems, 
   ParseResult,
@@ -67,6 +73,7 @@ import {
   ReceiptParseResult,
   suggestShoppingListWithGemini,
   ShoppingListSuggestion,
+  SinglePriceScanResult,
   parseApiResults,
   parseScrapedResults,
   analyzeStoreForApi
@@ -77,6 +84,7 @@ import StoreAnalyzerWizard from "./StoreAnalyzerWizard";
 import GSheetsConfigForm from "./GSheetsConfigForm";
 import CatalogTab from "./CatalogTab";
 import ScanTab from "./ScanTab";
+import ConfirmDialog from "./ConfirmDialog";
 import ShoppingListTab from "./ShoppingListTab";
 
 export default function App() {
@@ -88,10 +96,47 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState<string>(db.getSelectedModel());
   const [discoveredModels, setDiscoveredModels] = useState<Array<{name: string, displayName: string}>>(db.getDiscoveredModels());
   const [isUpdatingModels, setIsUpdatingModels] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<"home" | "upload" | "catalog" | "shopping" | "settings" | "scan" | "receipts">("home");
+  const [activeTab, setActiveTab] = useState<"home" | "upload" | "catalog" | "shopping" | "settings" | "scan" | "receipts" | "inflation">("home");
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
-  
+  const [darkMode, setDarkMode] = useState<boolean>(() => localStorage.getItem("bp_dark_mode") === "true");
+  const [monthlyBudget, setMonthlyBudget] = useState<number>(() => {
+    const saved = localStorage.getItem("bp_monthly_budget");
+    return saved ? Number(saved) : 0;
+  });
+  const [alerts, setAlerts] = useState<PriceAlert[]>(() => db.getAlerts());
+  const [newAlertName, setNewAlertName] = useState("");
+  const [newAlertTarget, setNewAlertTarget] = useState("");
+  const refreshAlerts = useCallback(() => setAlerts(db.getAlerts()), []);
+  const createAlert = useCallback((productName: string, currentPrice: number) => {
+    db.saveAlert({
+      id: `alert-${Date.now()}`,
+      productName,
+      productId: "",
+      targetPrice: currentPrice * 0.9,
+      currentBestPrice: currentPrice,
+      active: true,
+      createdAt: new Date().toISOString(),
+    });
+    refreshAlerts();
+    triggerSuccess(`Alerta creada para "${productName}". Te avisaremos si baja de $${(currentPrice * 0.9).toFixed(0)}.`);
+  }, [refreshAlerts, triggerSuccess]);
+
+  // Check alerts whenever products change
+  useEffect(() => {
+    alerts.forEach(alert => {
+      if (!alert.active) return;
+      const currentBest = products
+        .filter(p => p.name.toLowerCase().includes(alert.productName.toLowerCase()))
+        .reduce((min, p) => Math.min(min, p.salePrice), Infinity);
+      if (currentBest !== Infinity && currentBest <= alert.targetPrice && alert.lastTriggeredAt !== "notified") {
+        db.saveAlert({ ...alert, lastTriggeredAt: "notified" });
+        triggerSuccess(`¡"${alert.productName}" bajó a $${currentBest.toFixed(0)}!`);
+      }
+    });
+    refreshAlerts();
+  }, [products, triggerSuccess, refreshAlerts]);
+
   // Receipts / Tickets States
   const [receipts, setReceipts] = useState<Receipt[]>([]);
   const [isProcessingReceipt, setIsProcessingReceipt] = useState<boolean>(false);
@@ -113,19 +158,26 @@ export default function App() {
   
   // Statuses
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const { errorMessage, successMessage, triggerError, triggerSuccess, setErrorMessage, setSuccessMessage } = useAlerts();
 
-  // Flash warning helper
-  const triggerError = useCallback((msg: string) => {
-    setErrorMessage(msg);
-    setTimeout(() => setErrorMessage(null), 6000);
-  }, [setErrorMessage]);
+  // AbortController for deduplicating search requests
+  const searchAbortRef = useRef<AbortController | null>(null);
 
-  const triggerSuccess = useCallback((msg: string) => {
-    setSuccessMessage(msg);
-    setTimeout(() => setSuccessMessage(null), 4000);
-  }, [setSuccessMessage]);
+  // Confirm dialog state
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    variant?: "danger" | "default";
+    confirmLabel?: string;
+    onConfirm: () => void;
+  } | null>(null);
+
+  const requestConfirm = useCallback(
+    (title: string, message: string, onConfirm: () => void, variant: "danger" | "default" = "default", confirmLabel?: string) => {
+      setConfirmDialog({ title, message, variant, confirmLabel, onConfirm });
+    },
+    []
+  );
 
   // Upload/AI states
   const [manualSupermarket, setManualSupermarket] = useState<string>("");
@@ -174,7 +226,7 @@ export default function App() {
   const [customItemName, setCustomItemName] = useState<string>("");
   const [customItemCategory, setCustomItemCategory] = useState<string>("Produce");
   const [customItemPrice, setCustomItemPrice] = useState<string>("");
-  const [customItemSupermarket, setCustomItemSupermarket] = useState<string>("Manual Store");
+  const [customItemSupermarket, setCustomItemSupermarket] = useState<string>("Tienda Manual");
   const [customItemAmount, setCustomItemAmount] = useState<string>("1");
   const [customItemUnit, setCustomItemUnit] = useState<string>("unit");
 
@@ -345,9 +397,16 @@ export default function App() {
           });
         }
 
-        db.clearAllProducts();
-        db.saveProducts(mergedProducts);
-        mergedReceipts.forEach(r => db.saveReceipt(r));
+        // Temp-key swap: save backup before clearing to prevent data loss on failure
+        const prevProducts = db.getProducts();
+        try {
+          db.clearAllProducts();
+          db.saveProducts(mergedProducts);
+          mergedReceipts.forEach(r => db.saveReceipt(r));
+        } catch (err) {
+          db.saveProducts(prevProducts);
+          throw err;
+        }
 
         setProducts(mergedProducts);
         setReceipts(mergedReceipts);
@@ -439,7 +498,7 @@ export default function App() {
 
     navigator.clipboard.writeText(shareableUrl)
       .then(() => {
-        let msg = "¡Enlace de sincronización copiado a la papelera!";
+        let msg = "¡Enlace de sincronización copiado al portapapeles!";
         if (gsheetsSSID && gsheetsUrl) {
           msg = "¡Enlace de sincronización copiado (incluye SSID y GAS URL)!";
         } else if (gsheetsUrl) {
@@ -485,7 +544,7 @@ export default function App() {
 
   // Searches for active promotional offers from:
   // 1. Uploaded flyers (sourceType === "brochure")
-  // 2. Online store catalogs (preset catalogs inside findSimilarOnlineProducts)
+  // 2. Online store catalogs (findSimilarOnlineProducts disabled — no preset data)
   const getBestAvailableOffer = useCallback((itemName: string, category: string) => {
     const query = itemName.toLowerCase().trim();
 
@@ -517,28 +576,24 @@ export default function App() {
       });
     });
 
-    // Support preset catalogs (preloaded online supermarket items)
-    const onlinePresets = findSimilarOnlineProducts(itemName, category || "Other");
-    onlinePresets.forEach((o: any) => {
-      if (!allOffers.some(of => of.supermarket === o.storeName && of.price === o.price)) {
-        allOffers.push({
-          supermarket: o.storeName,
-          price: o.price,
-          name: o.productName,
-          sourceType: "online_preset"
-        });
-      }
-    });
-
     if (allOffers.length === 0) return null;
 
     // Pick the absolute cheapest offer
     return allOffers.sort((a, b) => a.price - b.price)[0];
   }, [products]);
 
+  // Dark mode toggle
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", darkMode);
+    localStorage.setItem("bp_dark_mode", String(darkMode));
+  }, [darkMode]);
+
   // Load all records on boot
   useEffect(() => {
-    db.clearOldData();
+    if (!localStorage.getItem("bp_migration_v2_complete")) {
+      db.clearOldData();
+      localStorage.setItem("bp_migration_v2_complete", "true");
+    }
     setProducts(db.getProducts());
     setShoppingList(db.getShoppingList());
     setUploads(db.getUploads());
@@ -578,7 +633,7 @@ export default function App() {
     // Attempt to load extra presets from JSON (legacy, non-critical)
     fetch(`${import.meta.env.BASE_URL}supermarkets.json`)
       .then((res) => {
-        if (!res.ok) throw new Error("No supermarkets.json found");
+        if (!res.ok) throw new Error("No se encontró supermarkets.json");
         return res.json();
       })
       .then((jsonPresets: CatalogSource[]) => {
@@ -627,13 +682,29 @@ export default function App() {
   }, []);
 
   // Manage camera release on tab switch
+  const isScanningRef = useRef(false);
+  const cameraCleanupPendingRef = useRef(false);
+
+  const doStopCamera = useCallback(() => {
+    if (isScanningRef.current) {
+      cameraCleanupPendingRef.current = true;
+      return;
+    }
+    if (cameraStream) {
+      cameraStream.getTracks().forEach((track) => track.stop());
+      setCameraStream(null);
+    }
+    setIsCameraActive(false);
+    cameraCleanupPendingRef.current = false;
+  }, [cameraStream]);
+
   useEffect(() => {
     if (activeTab !== "scan") {
-      stopCamera();
+      doStopCamera();
     }
-  }, [activeTab]);
+  }, [activeTab, doStopCamera]);
 
-  const startCamera = async () => {
+  const startCamera = useCallback(async () => {
     setCameraError(null);
     setScannedItem(null);
     setScanCapturedImage(null);
@@ -643,7 +714,6 @@ export default function App() {
       });
       setCameraStream(stream);
       setIsCameraActive(true);
-      // Wait a tick for DOM video element to exist
       setTimeout(() => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -651,25 +721,21 @@ export default function App() {
       }, 100);
     } catch (err: any) {
       console.error("Camera access error:", err);
-      setCameraError(`Could not access camera: ${err.message || err}. You can also use the manual upload button option below to scan an image of a price label.`);
+      setCameraError(`No se pudo acceder a la cámara: ${err.message || err}. También puedes usar el botón de carga manual.`);
     }
-  };
+  }, [setCameraError, setScannedItem, setScanCapturedImage, setCameraStream, setIsCameraActive]);
 
-  const stopCamera = () => {
-    if (cameraStream) {
-      cameraStream.getTracks().forEach((track) => track.stop());
-      setCameraStream(null);
-    }
-    setIsCameraActive(false);
-  };
+  const stopCamera = useCallback(() => {
+    doStopCamera();
+  }, [doStopCamera]);
 
-  const capturePhotoAndScan = async () => {
+  const capturePhotoAndScan = useCallback(async () => {
     if (!videoRef.current || !cameraStream) {
-      triggerError("Camera is not live. Let's start the camera first.");
+      triggerError("La cámara no está activa. Inicia la cámara primero.");
       return;
     }
     if (!apiKey) {
-      triggerError("Gemini API Key is required. Please set it in Settings.");
+      triggerError("Se requiere API Key de Gemini. Configúrala en Ajustes.");
       setActiveTab("settings");
       return;
     }
@@ -692,25 +758,33 @@ export default function App() {
       setScanCapturedImage(dataUrl);
       const base64Data = dataUrl.split(",")[1];
 
-      // Stop camera feed
-      stopCamera();
+      isScanningRef.current = true;
 
-      // Call Gemini for smart label extraction
+      doStopCamera();
+
       const result = await scanSinglePriceWithGemini(base64Data, "image/jpeg", apiKey);
+      isScanningRef.current = false;
+      if (cameraCleanupPendingRef.current) {
+        doStopCamera();
+      }
       setScannedItem(result);
-      triggerSuccess(`Scanned: ${result.productName} at $${result.price}`);
+      triggerSuccess(`Escaneado: ${result.productName} a $${result.price}`);
     } catch (err: any) {
+      isScanningRef.current = false;
+      if (cameraCleanupPendingRef.current) {
+        doStopCamera();
+      }
       console.error("Snapshot analysis failure:", err);
-      setCameraError(`Failed to parse target price card: ${err.message || err}`);
+      setCameraError(`No se pudo analizar la etiqueta: ${err.message || err}`);
     } finally {
       setIsCurrentlyScanning(false);
     }
-  };
+  }, [cameraStream, apiKey, triggerError, setActiveTab, setIsCurrentlyScanning, setCameraError, setScanCapturedImage, doStopCamera, scanSinglePriceWithGemini, triggerSuccess, setScannedItem]);
 
-  const handleScanFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleScanFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || !e.target.files[0]) return;
     if (!apiKey) {
-      triggerError("Gemini API Key is required inside settings to scan!");
+      triggerError("Se requiere API Key de Gemini. Configúrala en Ajustes.");
       setActiveTab("settings");
       return;
     }
@@ -728,14 +802,14 @@ export default function App() {
 
       const result = await scanSinglePriceWithGemini(base64, mimeType, apiKey);
       setScannedItem(result);
-      triggerSuccess(`Scanned Product: ${result.productName} for $${result.price}`);
+      triggerSuccess(`Escaneado: ${result.productName} a $${result.price}`);
     } catch (err: any) {
       console.error("Uploaded file analysis failed:", err);
-      setCameraError(`Failed to parse file tag: ${err.message || err}`);
+      setCameraError(`No se pudo analizar la etiqueta: ${err.message || err}`);
     } finally {
       setIsCurrentlyScanning(false);
     }
-  };
+  }, [apiKey, triggerError, setActiveTab, setIsCurrentlyScanning, setCameraError, setScannedItem, setScanCapturedImage, fileToBase64, scanSinglePriceWithGemini, triggerSuccess]);
 
   const addScannedToCatalog = useCallback(() => {
     if (!scannedItem) return;
@@ -749,7 +823,7 @@ export default function App() {
       salePrice: scannedItem.price,
       amount: scannedItem.amount || 1,
       unit: scannedItem.unit || "unit",
-      supermarket: scannedItem.supermarket || "Scanned Store",
+      supermarket: scannedItem.supermarket || "Tienda Escaneada",
       dateExtracted: new Date().toISOString(),
       unitPrice: scannedItem.price * norm.multiplier,
       baseUnit: norm.baseUnit,
@@ -759,7 +833,7 @@ export default function App() {
 
     db.saveProduct(newProduct);
     setProducts(db.getProducts());
-    triggerSuccess(`Added ${scannedItem.productName} to comparison database!`);
+    triggerSuccess(`"${scannedItem.productName}" agregado a la base de comparación.`);
     
     // reset scanner view
     setScannedItem(null);
@@ -942,9 +1016,17 @@ export default function App() {
   };
 
   const handleDeleteReceipt = (id: string) => {
-    db.deleteReceipt(id);
-    setReceipts(db.getReceipts());
-    triggerSuccess("Compra eliminada del historial.");
+    requestConfirm(
+      "¿Eliminar compra?",
+      "Este recibo y los precios asociados se eliminarán del historial.",
+      () => {
+        db.deleteReceipt(id);
+        setReceipts(db.getReceipts());
+        triggerSuccess("Compra eliminada del historial.");
+      },
+      "danger",
+      "Eliminar"
+    );
   };
 
   const handleGenerateLocalSuggestions = useCallback(() => {
@@ -1061,6 +1143,13 @@ export default function App() {
 
   // Execute online price search across all enabled catalog sources (API + Scrape)
   const executeOnlineSearch = useCallback(async (query: string) => {
+    // Cancel any in-flight search before starting a new one
+    if (searchAbortRef.current) {
+      searchAbortRef.current.abort();
+    }
+    const abortController = new AbortController();
+    searchAbortRef.current = abortController;
+
     if (!query.trim()) {
       triggerError("Ingresa un producto para buscar.");
       return;
@@ -1081,16 +1170,15 @@ export default function App() {
     const sourceErrors: { sourceName: string; error: string }[] = [];
     const encodedQuery = encodeURIComponent(query.trim());
 
+    const signal = abortController.signal;
     async function tryFetch(url: string, opts?: RequestInit): Promise<Response | null> {
-      try { return await fetch(url, opts); } catch { return null; }
+      try { return await fetch(url, { ...opts, signal }); } catch { return null; }
     }
 
     const gsheetsUrl = localStorage.getItem("bp_gsheets_url") || "";
     const gsheetsProxyEnabled = localStorage.getItem("bp_gsheets_proxy_enabled") !== "false";
     const publicProxyEnabled = localStorage.getItem("bp_public_proxy_enabled") !== "false";
-    const PROXIES = publicProxyEnabled
-      ? ["https://corsproxy.io/?url={url}", "https://api.allorigins.win/raw?url={url}"]
-      : [];
+    const PROXIES = publicProxyEnabled ? getPublicProxies() : [];
 
     async function fetchWithFallback(
       targetUrl: string, sourceName: string, fetchOptions?: RequestInit, isJson = true, sessionId?: string
@@ -1106,7 +1194,7 @@ export default function App() {
             ...(sessionId ? { sessionId } : {}),
           });
           console.log(`[${sourceName}] Trying GAS proxy for ${targetUrl.slice(0, 80)}...`);
-          const gasRes = await fetch(gsheetsUrl, { method: "POST", mode: "cors", headers: { "Content-Type": "text/plain" }, body: gasBody });
+          const gasRes = await fetch(gsheetsUrl, { method: "POST", mode: "cors", headers: { "Content-Type": "text/plain" }, body: gasBody, signal });
           const gasJson = await gasRes.json();
           if (gasJson.status === "success" && gasJson.body) {
             console.log(`[${sourceName}] GAS proxy succeeded, ${gasJson.body.length} bytes`);
@@ -1251,14 +1339,16 @@ export default function App() {
     }
 
     if (rawResults.length === 0 && scrapedInputs.length === 0) {
-      triggerError("No se pudieron obtener resultados de ninguna fuente.");
+      if (!signal.aborted) triggerError("No se pudieron obtener resultados de ninguna fuente.");
       setIsSearchingOnline(false);
       return;
     }
 
+    if (signal.aborted) { setIsSearchingOnline(false); return; }
+
     try {
       if (!apiKey) {
-        triggerError("Se requiere API Key de Gemini.");
+        if (!signal.aborted) triggerError("Se requiere API Key de Gemini.");
         setIsSearchingOnline(false);
         return;
       }
@@ -1274,6 +1364,8 @@ export default function App() {
         const parsed = await parseScrapedResults(scrapedInputs, query, apiKey);
         if (Array.isArray(parsed)) allParsed.push(...parsed);
       }
+
+      if (signal.aborted) { setIsSearchingOnline(false); return; }
 
       const queryLower = query.toLowerCase();
       const queryWords = queryLower.split(/\s+/).filter(Boolean);
@@ -1306,33 +1398,33 @@ export default function App() {
     const demoUploads: BroshureUpload[] = [
       {
         id: "demo-upload-1",
-        fileName: "march-super-deals.pdf",
-        supermarket: "Safeway Foods",
-        dateExtracted: new Date(Date.now() - 25 * 24 * 60 * 60 * 1000).toISOString(), // 25 days ago
+        fileName: "marzo-super-ofertas.pdf",
+        supermarket: "Carrefour",
+        dateExtracted: new Date(Date.now() - 25 * 24 * 60 * 60 * 1000).toISOString(),
         status: "completed",
         itemCount: 6,
       },
       {
         id: "demo-upload-2",
-        fileName: "april-weekly-circular.pdf",
-        supermarket: "Safeway Foods",
-        dateExtracted: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString(), // 12 days ago
+        fileName: "abril-circular-semanal.pdf",
+        supermarket: "Carrefour",
+        dateExtracted: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString(),
         status: "completed",
         itemCount: 6,
       },
       {
         id: "demo-upload-3",
-        fileName: "may-weekly-circular.pdf",
-        supermarket: "Safeway Foods",
-        dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(), // 1 day ago
+        fileName: "mayo-circular-semanal.pdf",
+        supermarket: "Carrefour",
+        dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
         status: "completed",
         itemCount: 6,
       },
       {
         id: "demo-upload-4",
-        fileName: "aldis-deals.pdf",
-        supermarket: "Aldi Market",
-        dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(), // 1 day ago
+        fileName: "dia-ofertas.pdf",
+        supermarket: "Día",
+        dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
         status: "completed",
         itemCount: 5,
       }
@@ -1340,260 +1432,250 @@ export default function App() {
 
     // Build timeline details for key items
     const demoProducts: Product[] = [
-      // Bananas - Safeway Price Trend
+      // Bananas - Carrefour Price Trend
       {
-        id: "p1-safeway-dt1",
-        name: "Organic Bananas",
+        id: "p1-cf-dt1",
+        name: "Bananas",
         category: "Produce",
-        originalPrice: 2.20,
-        salePrice: 1.99,
+        originalPrice: 1200,
+        salePrice: 990,
         amount: 1,
         unit: "kg",
-        supermarket: "Safeway Foods",
+        supermarket: "Carrefour",
         dateExtracted: new Date(Date.now() - 25 * 24 * 60 * 60 * 1000).toISOString(),
-        description: "Fresh premium Cavendish",
-        unitPrice: 1.99,
+        unitPrice: 990,
         baseUnit: "kg",
         sourceType: "brochure"
       },
       {
-        id: "p1-safeway-dt2",
-        name: "Organic Bananas",
+        id: "p1-cf-dt2",
+        name: "Bananas",
         category: "Produce",
-        originalPrice: 2.20,
-        salePrice: 1.79,
+        originalPrice: 1200,
+        salePrice: 890,
         amount: 1,
         unit: "kg",
-        supermarket: "Safeway Foods",
+        supermarket: "Carrefour",
         dateExtracted: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString(),
-        description: "Fresh premium Cavendish",
-        unitPrice: 1.79,
+        unitPrice: 890,
         baseUnit: "kg",
         sourceType: "brochure"
       },
       {
-        id: "p1-safeway-dt3",
-        name: "Organic Bananas",
+        id: "p1-cf-dt3",
+        name: "Bananas",
         category: "Produce",
-        originalPrice: 2.20,
-        salePrice: 1.65,
+        originalPrice: 1200,
+        salePrice: 820,
         amount: 1,
         unit: "kg",
-        supermarket: "Safeway Foods",
+        supermarket: "Carrefour",
         dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-        description: "Fresh premium Cavendish - Lowest yet!",
-        unitPrice: 1.65,
+        unitPrice: 820,
         baseUnit: "kg",
         sourceType: "brochure"
       },
-      // Bananas - Aldi Market
       {
-        id: "p1-aldi-dt1",
-        name: "Organic Bananas",
+        id: "p1-dia-dt1",
+        name: "Bananas",
         category: "Produce",
-        originalPrice: 1.99,
-        salePrice: 1.99,
+        originalPrice: 1100,
+        salePrice: 790,
         amount: 1,
         unit: "kg",
-        supermarket: "Aldi Market",
+        supermarket: "Día",
         dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-        description: "Aldi Savers organic bunch",
-        unitPrice: 1.99,
+        unitPrice: 790,
         baseUnit: "kg",
         sourceType: "brochure"
       },
 
-      // Whole Milk - Safeway Foods Trend
+      // Leche Entera - Carrefour Trend
       {
-        id: "p2-safeway-dt1",
-        name: "Whole Milk 1 Gallon",
+        id: "p2-cf-dt1",
+        name: "Leche Entera 1L",
         category: "Dairy",
-        originalPrice: 4.20,
-        salePrice: 3.99,
+        originalPrice: 1350,
+        salePrice: 1190,
         amount: 1,
-        unit: "gal",
-        supermarket: "Safeway Foods",
+        unit: "L",
+        supermarket: "Carrefour",
         dateExtracted: new Date(Date.now() - 25 * 24 * 60 * 60 * 1000).toISOString(),
-        description: "Safeway Lucerne Creamy",
-        unitPrice: 3.99,
+        unitPrice: 1190,
         baseUnit: "L",
         sourceType: "brochure"
       },
       {
-        id: "p2-safeway-dt2",
-        name: "Whole Milk 1 Gallon",
+        id: "p2-cf-dt2",
+        name: "Leche Entera 1L",
         category: "Dairy",
-        originalPrice: 4.20,
-        salePrice: 3.79,
+        originalPrice: 1350,
+        salePrice: 1090,
         amount: 1,
-        unit: "gal",
-        supermarket: "Safeway Foods",
+        unit: "L",
+        supermarket: "Carrefour",
         dateExtracted: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString(),
-        unitPrice: 3.79,
+        unitPrice: 1090,
         baseUnit: "L",
         sourceType: "brochure"
       },
       {
-        id: "p2-safeway-dt3",
-        name: "Whole Milk 1 Gallon",
+        id: "p2-cf-dt3",
+        name: "Leche Entera 1L",
         category: "Dairy",
-        originalPrice: 4.20,
-        salePrice: 3.49,
+        originalPrice: 1350,
+        salePrice: 990,
         amount: 1,
-        unit: "gal",
-        supermarket: "Safeway Foods",
+        unit: "L",
+        supermarket: "Carrefour",
         dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-        unitPrice: 3.49,
+        unitPrice: 990,
         baseUnit: "L",
         sourceType: "brochure"
       },
-      // Whole Milk - Aldi Market
       {
-        id: "p2-aldi-dt1",
-        name: "Whole Milk 1 Gallon",
+        id: "p2-dia-dt1",
+        name: "Leche Entera 1L",
         category: "Dairy",
-        originalPrice: 3.39,
-        salePrice: 3.39,
+        originalPrice: 1250,
+        salePrice: 950,
         amount: 1,
-        unit: "gal",
-        supermarket: "Aldi Market",
+        unit: "L",
+        supermarket: "Día",
         dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-        description: "Friendly Farms Grade A Milk",
-        unitPrice: 3.39,
+        unitPrice: 950,
         baseUnit: "L",
         sourceType: "brochure"
       },
 
-      // Greek Yogurt
+      // Yogur firme 190g
       {
-        id: "p3-safeway-dt1",
-        name: "Greek Yogurt 500g",
+        id: "p3-cf-dt1",
+        name: "Yogur Firme 190g",
         category: "Dairy",
-        originalPrice: 4.99,
-        salePrice: 4.50,
-        amount: 500,
+        originalPrice: 1280,
+        salePrice: 1050,
+        amount: 190,
         unit: "g",
-        supermarket: "Safeway Foods",
+        supermarket: "Carrefour",
         dateExtracted: new Date(Date.now() - 25 * 24 * 60 * 60 * 1000).toISOString(),
-        unitPrice: 9.0, // per kg
+        unitPrice: 5526,
         baseUnit: "kg",
         sourceType: "brochure"
       },
       {
-        id: "p3-safeway-dt2",
-        name: "Greek Yogurt 500g",
+        id: "p3-cf-dt2",
+        name: "Yogur Firme 190g",
         category: "Dairy",
-        originalPrice: 4.99,
-        salePrice: 4.25,
-        amount: 500,
+        originalPrice: 1280,
+        salePrice: 990,
+        amount: 190,
         unit: "g",
-        supermarket: "Safeway Foods",
+        supermarket: "Carrefour",
         dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-        unitPrice: 8.5,
+        unitPrice: 5211,
         baseUnit: "kg",
         sourceType: "brochure"
       },
       {
-        id: "p3-aldi-dt1",
-        name: "Greek Yogurt 500g",
+        id: "p3-dia-dt1",
+        name: "Yogur Firme 190g",
         category: "Dairy",
-        originalPrice: 4.10,
-        salePrice: 3.89,
-        amount: 500,
+        originalPrice: 1090,
+        salePrice: 890,
+        amount: 190,
         unit: "g",
-        supermarket: "Aldi Market",
+        supermarket: "Día",
         dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-        description: "Chobani Plain Nonfat",
-        unitPrice: 7.78,
+        unitPrice: 4684,
         baseUnit: "kg",
         sourceType: "brochure"
       },
 
-      // Boneless Chicken Breast
+      // Pechuga de Pollo
       {
-        id: "p4-safeway-dt1",
-        name: "Boneless Chicken Breast",
+        id: "p4-cf-dt1",
+        name: "Pechuga de Pollo x kg",
         category: "Meat",
-        originalPrice: 10.99,
-        salePrice: 9.49,
+        originalPrice: 5500,
+        salePrice: 4990,
         amount: 1,
         unit: "kg",
-        supermarket: "Safeway Foods",
+        supermarket: "Carrefour",
         dateExtracted: new Date(Date.now() - 25 * 24 * 60 * 60 * 1000).toISOString(),
-        unitPrice: 9.49,
+        unitPrice: 4990,
         baseUnit: "kg",
         sourceType: "brochure"
       },
       {
-        id: "p4-safeway-dt2",
-        name: "Boneless Chicken Breast",
+        id: "p4-cf-dt2",
+        name: "Pechuga de Pollo x kg",
         category: "Meat",
-        originalPrice: 10.99,
-        salePrice: 8.49,
+        originalPrice: 5500,
+        salePrice: 4690,
         amount: 1,
         unit: "kg",
-        supermarket: "Safeway Foods",
+        supermarket: "Carrefour",
         dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-        unitPrice: 8.49,
+        unitPrice: 4690,
         baseUnit: "kg",
         sourceType: "brochure"
       },
       {
-        id: "p4-aldi-dt1",
-        name: "Boneless Chicken Breast 1kg",
+        id: "p4-dia-dt1",
+        name: "Pechuga de Pollo x kg",
         category: "Meat",
-        originalPrice: 8.99,
-        salePrice: 8.49,
+        originalPrice: 5200,
+        salePrice: 4490,
         amount: 1,
         unit: "kg",
-        supermarket: "Aldi Market",
+        supermarket: "Día",
         dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-        description: "Fresh premium hormone-free",
-        unitPrice: 8.49,
+        unitPrice: 4490,
         baseUnit: "kg",
         sourceType: "brochure"
       },
 
-      // Fresh Strawberries
+      // Frutillas 500g
       {
-        id: "p5-safeway-dt1",
-        name: "Fresh Strawberries 454g",
+        id: "p5-cf-dt1",
+        name: "Frutillas 500g",
         category: "Produce",
-        originalPrice: 4.49,
-        salePrice: 3.99,
-        amount: 454,
+        originalPrice: 2200,
+        salePrice: 1890,
+        amount: 500,
         unit: "g",
-        supermarket: "Safeway Foods",
+        supermarket: "Carrefour",
         dateExtracted: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString(),
-        unitPrice: 8.78,
+        unitPrice: 3780,
         baseUnit: "kg",
         sourceType: "brochure"
       },
       {
-        id: "p5-safeway-dt2",
-        name: "Fresh Strawberries 454g",
+        id: "p5-cf-dt2",
+        name: "Frutillas 500g",
         category: "Produce",
-        originalPrice: 4.49,
-        salePrice: 3.49,
-        amount: 454,
-        unit: "g",
-        supermarket: "Safeway Foods",
-        dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-        unitPrice: 7.68,
-        baseUnit: "kg",
-        sourceType: "brochure"
-      },
-      {
-        id: "p5-aldi-dt1",
-        name: "Fresh Strawberries 500g",
-        category: "Produce",
-        originalPrice: 4.50,
-        salePrice: 3.59,
+        originalPrice: 2200,
+        salePrice: 1690,
         amount: 500,
         unit: "g",
-        supermarket: "Aldi Market",
+        supermarket: "Carrefour",
         dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
-        unitPrice: 7.18,
+        unitPrice: 3380,
+        baseUnit: "kg",
+        sourceType: "brochure"
+      },
+      {
+        id: "p5-dia-dt1",
+        name: "Frutillas 500g",
+        category: "Produce",
+        originalPrice: 2100,
+        salePrice: 1590,
+        amount: 500,
+        unit: "g",
+        supermarket: "Día",
+        dateExtracted: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
+        unitPrice: 3180,
         baseUnit: "kg",
         sourceType: "brochure"
       }
@@ -1606,21 +1688,26 @@ export default function App() {
     // Update frontend state
     setProducts(db.getProducts());
     setUploads(db.getUploads());
-    triggerSuccess("Loaded high-quality grocery demo data! Ready for instant price comparison & trends.");
+    triggerSuccess("¡Datos demo cargados! Ya podés comparar precios y ver tendencias.");
   };
 
   // Reset database completely
   const handleClearDb = () => {
-    if (confirm("Are you sure you want to clear all extracted brochure data and reset?")) {
-      db.clearAllProducts();
-      db.clearShoppingList();
-      localStorage.removeItem("bp_uploads");
-      
-      setProducts([]);
-      setShoppingList([]);
-      setUploads([]);
-      triggerSuccess("Database successfully wiped.");
-    }
+    requestConfirm(
+      "¿Borrar todos los datos?",
+      "Se eliminarán todos los productos, la lista de compras y el historial de folletos. Esta acción no se puede deshacer.",
+      () => {
+        db.clearAllProducts();
+        db.clearShoppingList();
+        localStorage.removeItem("bp_uploads");
+        setProducts([]);
+        setShoppingList([]);
+        setUploads([]);
+        triggerSuccess("Base de datos borrada.");
+      },
+      "danger",
+      "Borrar todo"
+    );
   };
 
   // Handle PDF/Image brochure upload and call Gemini parsing
@@ -1643,11 +1730,11 @@ export default function App() {
 
   const processUpload = async () => {
     if (!selectedFile) {
-      triggerError("Please select or drop a brochure PDF or Image file first.");
+      triggerError("Seleccioná o arrastrá un archivo PDF o imagen del folleto primero.");
       return;
     }
     if (!apiKey) {
-      triggerError("Gemini API Key is required. Please add your key in Settings.");
+      triggerError("Se requiere la API Key de Gemini. Agregala en Ajustes.");
       setActiveTab("settings");
       return;
     }
@@ -1685,7 +1772,7 @@ export default function App() {
       const rawResult = await parseBrochureWithGemini(base64Data, mimeType, apiKey);
 
       // 3. Normalize items
-      const parsedItems = normalizeExtractedItems(rawResult, "brochure");
+      const parsedItems = normalizeExtractedItems(rawResult, "brochure", uploadId);
 
       // Set preview state for confirmation
       setExtractedPreview({
@@ -1703,7 +1790,7 @@ export default function App() {
       setUploads(prev => prev.map(u => u.id === uploadId ? finishedUpload : u));
       db.saveUpload(finishedUpload);
 
-      triggerSuccess(`AI successfully parsed brochure sheet! Review the items below.`);
+      triggerSuccess("¡Folleto procesado con IA! Revisá los artículos a continuación.");
     } catch (err: any) {
       console.error(err);
       const failedUpload: BroshureUpload = {
@@ -1711,7 +1798,7 @@ export default function App() {
         supermarket: manualSupermarket || "Unknown",
         status: "failed",
         itemCount: 0,
-        errorMessage: err.message || "Failed to parse PDF brochure file",
+        errorMessage: err.message || "Error al procesar el archivo del folleto",
       };
       setUploads(prev => prev.map(u => u.id === uploadId ? failedUpload : u));
       db.saveUpload(failedUpload);
@@ -1751,10 +1838,16 @@ export default function App() {
   };
 
   const discardPreview = () => {
-    if (confirm("Discard these extracted items?")) {
-      setExtractedPreview(null);
-      setManualSupermarket("");
-    }
+    requestConfirm(
+      "¿Descartar artículos?",
+      "Los artículos extraídos de este folleto no se guardarán en la base de datos.",
+      () => {
+        setExtractedPreview(null);
+        setManualSupermarket("");
+      },
+      "default",
+      "Descartar"
+    );
   };
 
   const handleEditPreviewItem = (index: number, field: keyof Product, value: any) => {
@@ -1786,19 +1879,6 @@ export default function App() {
     });
   };
 
-  // Helper file to base64
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const baseString = reader.result as string;
-        resolve(baseString.split(",")[1]);
-      };
-      reader.onerror = (e) => reject(e);
-      reader.readAsDataURL(file);
-    });
-  };
-
   // List of unique supermarkets in catalog
   const uniqueSupermarkets = useMemo(() => {
     const list = new Set<string>();
@@ -1824,7 +1904,7 @@ export default function App() {
       salePrice: price,
       amount: amountVal,
       unit: customItemUnit,
-      supermarket: customItemSupermarket.trim() || "Manual Store",
+      supermarket: customItemSupermarket.trim() || "Tienda Manual",
       dateExtracted: new Date().toISOString(),
       unitPrice,
       baseUnit: norm.baseUnit,
@@ -1840,20 +1920,26 @@ export default function App() {
     setCustomItemAmount("1");
     setCustomItemUnit("unit");
 
-    triggerSuccess(`Successfully added manual catalog reference.`);
+    triggerSuccess("Producto agregado al catálogo manualmente.");
   }, [customItemName, customItemPrice, customItemAmount, customItemUnit, customItemCategory, customItemSupermarket, setProducts, triggerSuccess]);
 
   // Remove individual catalog product
   const deleteProduct = useCallback((id: string) => {
-    if (confirm("Are you sure you want to delete this listing from database?")) {
-      db.deleteProduct(id);
-      setProducts(db.getProducts());
-      if (selectedCompareProduct?.id === id) {
-        setSelectedCompareProduct(null);
-      }
-      triggerSuccess("Product deleted.");
-    }
-  }, [selectedCompareProduct, setProducts, setSelectedCompareProduct, triggerSuccess]);
+    requestConfirm(
+      "¿Eliminar producto?",
+      "Este producto se eliminará de la base de datos de precios.",
+      () => {
+        db.deleteProduct(id);
+        setProducts(db.getProducts());
+        if (selectedCompareProduct?.id === id) {
+          setSelectedCompareProduct(null);
+        }
+        triggerSuccess("Producto eliminado.");
+      },
+      "danger",
+      "Eliminar"
+    );
+  }, [selectedCompareProduct, setProducts, setSelectedCompareProduct, triggerSuccess, requestConfirm]);
 
   // Add Item to Shopping List
   const addToShoppingList = useCallback((product: Product) => {
@@ -1879,7 +1965,7 @@ export default function App() {
       db.saveShoppingListItem(newItem);
     }
     setShoppingList(db.getShoppingList());
-    triggerSuccess(`Added ${product.name} to shopping list.`);
+    triggerSuccess(`"${product.name}" agregado a tu lista de compras.`);
   }, [shoppingList, setShoppingList, triggerSuccess]);
 
   // Modify quantities on active shopping list
@@ -1908,11 +1994,17 @@ export default function App() {
   }, [setShoppingList]);
 
   const clearList = useCallback(() => {
-    if (confirm("Clear your entire shopping list?")) {
-      db.clearShoppingList();
-      setShoppingList([]);
-    }
-  }, [setShoppingList]);
+    requestConfirm(
+      "¿Vaciar lista de compras?",
+      "Todos los artículos de la lista se eliminarán.",
+      () => {
+        db.clearShoppingList();
+        setShoppingList([]);
+      },
+      "danger",
+      "Vaciar"
+    );
+  }, [setShoppingList, requestConfirm]);
 
   // Keep uniqueSupermarkets here since it is also used by shoppingOptimization
   // filteredProducts, productPriceHistory, catalogComparisons moved to CatalogTab
@@ -1926,7 +2018,6 @@ export default function App() {
     // 2. Best combined option (buying each item where it is absolute cheapest)
     const supermarketsRepresented = Array.from(new Set([
       ...uniqueSupermarkets,
-      ...presetOnlineStores.map(s => s.name)
     ]));
 
     // Build standard structure mapping item name to price at each market
@@ -1953,9 +2044,6 @@ export default function App() {
       // Look up prices in local db for this item across other supermarkets
       const localMatches = products.filter(p => p.name.toLowerCase().trim() === listNameClean);
       
-      // Look up prices in online catalogs for this item
-      const onlineMatches = findSimilarOnlineProducts(item.name, item.category);
-
       // Collate all known prices for this product name
       const priceBook: { [market: string]: number } = { [item.supermarket]: item.price };
       
@@ -2038,7 +2126,7 @@ export default function App() {
   // Export handling
   const handleExportCSV = useCallback(() => {
     if (products.length === 0) {
-      triggerError("No data available to export. Standardize some brochures first.");
+      triggerError("No hay datos para exportar. Procesá algunos folletos primero.");
       return;
     }
     const csvContent = convertToCSV(products);
@@ -2050,7 +2138,7 @@ export default function App() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    triggerSuccess("CSV catalog exported. You can import this directly into Google Sheets!");
+    triggerSuccess("Catálogo exportado como CSV. Podés importarlo directamente en Google Sheets.");
   }, [products, triggerError, triggerSuccess]);
 
   // Custom Supermarket Search Engines Actions
@@ -2305,7 +2393,7 @@ export default function App() {
           }
         }
         if (!response && localStorage.getItem("bp_public_proxy_enabled") !== "false") {
-          const proxies = ["https://corsproxy.io/?url={url}", "https://api.allorigins.win/raw?url={url}"];
+          const proxies = getPublicProxies();
           for (const tmpl of proxies) {
             response = await tryFetchNorm(tmpl.replace(/{url}/g, encodeURIComponent(targetUrl)), fetchOptions);
             if (response) break;
@@ -2362,7 +2450,7 @@ export default function App() {
           }
         }
         if (!response && localStorage.getItem("bp_public_proxy_enabled") !== "false") {
-          const proxies = ["https://corsproxy.io/?url={url}", "https://api.allorigins.win/raw?url={url}"];
+          const proxies = getPublicProxies();
           for (const tmpl of proxies) {
             console.log(`[Test ${source.name}] Trying public proxy: ${tmpl}`);
             response = await tryFetch(tmpl.replace(/{url}/g, encodeURIComponent(scrapeUrl)));
@@ -2400,7 +2488,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col md:flex-row bg-slate-50 text-slate-800 overflow-x-hidden">
+    <div className="min-h-screen flex flex-col md:flex-row bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-200 overflow-x-hidden">
       
       {/* Mobile Top Header (only on mobile) */}
       <header className="md:hidden sticky top-0 z-30 bg-slate-900 text-white shadow-md flex items-center justify-between px-4 py-3 shrink-0">
@@ -2608,6 +2696,23 @@ export default function App() {
             )}
           </button>
 
+          {/* Opción Inflación */}
+          <button
+            onClick={() => {
+              setActiveTab("inflation");
+              setMobileMenuOpen(false);
+            }}
+            className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-xl transition text-sm font-medium ${
+              activeTab === "inflation"
+                ? "bg-sky-500/10 text-sky-400 border border-sky-500/20"
+                : "hover:bg-slate-800 text-slate-400 hover:text-white border border-transparent"
+            }`}
+            title="Inflación"
+          >
+            <TrendingUp className="w-4 h-4 text-rose-400 shrink-0" />
+            {(!sidebarCollapsed || mobileMenuOpen) && <span>Inflación</span>}
+          </button>
+
           {/* Opción Ajustes */}
           <button
             onClick={() => {
@@ -2628,6 +2733,16 @@ export default function App() {
 
         {/* Sidebar Footer */}
         <div className="p-3 border-t border-slate-800 space-y-2">
+          {/* Dark Mode Toggle */}
+          <button
+            onClick={() => setDarkMode(!darkMode)}
+            className="flex w-full items-center justify-center p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition text-xs"
+            title={darkMode ? "Modo claro" : "Modo oscuro"}
+          >
+            {darkMode ? "☀️" : "🌙"}
+            {(!sidebarCollapsed || mobileMenuOpen) && <span className="ml-2">{darkMode ? "Modo claro" : "Modo oscuro"}</span>}
+          </button>
+
           {/* Desktop Collapse Toggle */}
           <button
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -2680,7 +2795,7 @@ export default function App() {
             >
               <AlertCircle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
               <div>
-                <p className="font-semibold text-sm">Action Requirement</p>
+                    <p className="font-semibold text-sm">Atención</p>
                 <p className="text-xs text-rose-700 mt-1">{errorMessage}</p>
               </div>
             </motion.div>
@@ -2695,7 +2810,7 @@ export default function App() {
             >
               <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0 mt-0.5" />
               <div>
-                <p className="font-semibold text-sm">Success</p>
+                    <p className="font-semibold text-sm">Éxito</p>
                 <p className="text-xs text-emerald-700 mt-1">{successMessage}</p>
               </div>
             </motion.div>
@@ -2724,7 +2839,7 @@ export default function App() {
                 <div className="relative z-10 space-y-4">
                   <div className="inline-flex items-center gap-2 px-3 py-1 bg-white/10 backdrop-blur-md rounded-full text-xs text-sky-300 font-medium border border-white/10">
                     <Sparkles className="w-3.5 h-3.5" />
-                    <span>Impulsado con Gemini 3.5 AI</span>
+                    <span>Impulsado con Gemini AI</span>
                   </div>
                   <h1 className="text-2xl md:text-4xl font-extrabold tracking-tight">
                     ¡Tu Planificador de Ahorro Inteligente! 🛍️✨
@@ -2747,6 +2862,24 @@ export default function App() {
                       <ReceiptIcon className="w-3.5 h-3.5 text-amber-400" />
                       {receipts.length} Compras en Historial
                     </span>
+                    {monthlyBudget > 0 && (() => {
+                      const now = new Date();
+                      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+                      const spentThisMonth = receipts
+                        .filter(r => r.date >= monthStart)
+                        .reduce((sum, r) => sum + r.totalAmount, 0);
+                      const pct = Math.min(100, (spentThisMonth / monthlyBudget) * 100);
+                      return (
+                        <span className="flex items-center gap-1.5 bg-slate-800/60 px-3 py-1.5 rounded-xl border border-slate-700/50">
+                          <Calculator className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="text-emerald-300">${spentThisMonth.toFixed(0)}</span>
+                          <span className="text-slate-500">/ ${monthlyBudget.toFixed(0)}</span>
+                          <div className="w-16 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                            <div className={`h-full rounded-full ${pct > 90 ? 'bg-rose-500' : pct > 70 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{width: `${pct}%`}} />
+                          </div>
+                        </span>
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
@@ -2765,7 +2898,7 @@ export default function App() {
                   {/* Card 1: Catálogo */}
                   <button
                     onClick={() => setActiveTab("catalog")}
-                    className="p-5 rounded-2xl bg-white border border-slate-100 hover:border-indigo-200 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between group active:scale-98 shadow-sm cursor-pointer"
+                    className="p-5 rounded-2xl bg-white border border-slate-100 hover:border-indigo-200 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between group active:scale-95 shadow-sm cursor-pointer"
                   >
                     <div className="space-y-3 w-full">
                       <div className="p-3 bg-indigo-50 text-indigo-600 rounded-xl w-fit group-hover:bg-indigo-100 transition duration-200">
@@ -2787,7 +2920,7 @@ export default function App() {
                   {/* Card 2: Escáner */}
                   <button
                     onClick={() => setActiveTab("scan")}
-                    className="p-5 rounded-2xl bg-white border border-slate-100 hover:border-emerald-200 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between group active:scale-98 shadow-sm cursor-pointer"
+                    className="p-5 rounded-2xl bg-white border border-slate-100 hover:border-emerald-200 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between group active:scale-95 shadow-sm cursor-pointer"
                   >
                     <div className="space-y-3 w-full">
                       <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl w-fit group-hover:bg-emerald-100 transition duration-200">
@@ -2809,7 +2942,7 @@ export default function App() {
                   {/* Card 3: Cargar Folletos */}
                   <button
                     onClick={() => setActiveTab("upload")}
-                    className="p-5 rounded-2xl bg-white border border-slate-100 hover:border-violet-200 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between group active:scale-98 shadow-sm cursor-pointer"
+                    className="p-5 rounded-2xl bg-white border border-slate-100 hover:border-violet-200 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between group active:scale-95 shadow-sm cursor-pointer"
                   >
                     <div className="space-y-3 w-full">
                       <div className="p-3 bg-violet-50 text-violet-600 rounded-xl w-fit group-hover:bg-violet-100 transition duration-200">
@@ -2831,7 +2964,7 @@ export default function App() {
                   {/* Card 4: Lista de Compras */}
                   <button
                     onClick={() => setActiveTab("shopping")}
-                    className="p-5 rounded-2xl bg-white border border-slate-100 hover:border-rose-200 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between group active:scale-98 shadow-sm cursor-pointer"
+                    className="p-5 rounded-2xl bg-white border border-slate-100 hover:border-rose-200 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between group active:scale-95 shadow-sm cursor-pointer"
                   >
                     <div className="space-y-3 w-full">
                       <div className="p-3 bg-rose-50 text-rose-600 rounded-xl w-fit group-hover:bg-rose-100 transition duration-200">
@@ -2853,7 +2986,7 @@ export default function App() {
                   {/* Card 5: Historial y Tickets */}
                   <button
                     onClick={() => setActiveTab("receipts")}
-                    className="p-5 rounded-2xl bg-white border border-slate-100 hover:border-amber-200 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between group active:scale-98 shadow-sm cursor-pointer"
+                    className="p-5 rounded-2xl bg-white border border-slate-100 hover:border-amber-200 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between group active:scale-95 shadow-sm cursor-pointer"
                   >
                     <div className="space-y-3 w-full">
                       <div className="p-3 bg-amber-50 text-amber-600 rounded-xl w-fit group-hover:bg-amber-100 transition duration-200">
@@ -2875,7 +3008,7 @@ export default function App() {
                   {/* Card 6: Ajustes e IA */}
                   <button
                     onClick={() => setActiveTab("settings")}
-                    className="p-5 rounded-2xl bg-white border border-slate-100 hover:border-slate-300 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between group active:scale-98 shadow-sm cursor-pointer"
+                    className="p-5 rounded-2xl bg-white border border-slate-100 hover:border-slate-300 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between group active:scale-95 shadow-sm cursor-pointer"
                   >
                     <div className="space-y-3 w-full">
                       <div className="p-3 bg-slate-50 text-slate-600 rounded-xl w-fit group-hover:bg-slate-100 transition duration-200">
@@ -2938,6 +3071,7 @@ export default function App() {
                 handleAddApiProductToCatalog={handleAddApiProductToCatalog}
                 handleAddAllApiProductsToCatalog={handleAddAllApiProductsToCatalog}
                 setActiveTab={setActiveTab}
+                onCreateAlert={createAlert}
               />
             )}
 
@@ -2984,15 +3118,15 @@ export default function App() {
                 <div className="bg-amber-50 border border-amber-200 p-4 rounded-2xl flex gap-3 text-amber-800">
                   <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
                   <div className="text-xs">
-                    <p className="font-bold">Gemini API Key Required</p>
+                    <p className="font-bold">Se requiere API Key de Gemini</p>
                     <p className="mt-1">
-                      To run the AI extraction, you need to add your personal Gemini API Key first. All brochures are parsed locally in your browser.
+                      Para usar la extracción por IA, necesitás agregar tu API Key de Gemini primero. Todos los folletos se procesan localmente en tu navegador.
                     </p>
                     <button
                       onClick={() => setActiveTab("settings")}
                       className="mt-2.5 bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg font-semibold transition text-[10px]"
                     >
-                      Enter API Key Now
+                      Ingresar API Key
                     </button>
                   </div>
                 </div>
@@ -3001,28 +3135,28 @@ export default function App() {
               {/* Upload Drag Box */}
               {!extractedPreview && (
                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-                  <h3 className="text-base font-bold text-slate-800 mb-1 flex items-center gap-2">
-                    <FileText className="w-5 h-5 text-sky-500" />
-                    Ingest Leaflet Catalog Brochure
-                  </h3>
-                  <p className="text-xs text-slate-500 mb-5">
-                    Gemini AI automatically parses grocery catalogs, identifies item names, measures, categories, regularly listed prices, discount pricing, and calculates units.
-                  </p>
+                    <h3 className="text-base font-bold text-slate-800 mb-1 flex items-center gap-2">
+                      <FileText className="w-5 h-5 text-sky-500" />
+                      Cargar Folleto de Ofertas
+                    </h3>
+                    <p className="text-xs text-slate-500 mb-5">
+                      Gemini AI analiza automáticamente folletos de supermercados: identifica productos, cantidades, categorías, precios de lista, descuentos y calcula precio por unidad.
+                    </p>
 
                   <div className="flex flex-col gap-4">
                     
                     {/* Supermarket Brand Hint input */}
                     <div className="w-full sm:max-w-xs">
-                      <label className="block text-slate-500 font-medium text-xs mb-1">
-                        Supermarket Name (Optional helper)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g. Safeway, Aldi, Carrefour..."
-                        value={manualSupermarket}
-                        onChange={(e) => setManualSupermarket(e.target.value)}
-                        className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:border-sky-500 focus:outline-none"
-                      />
+                        <label className="block text-slate-500 font-medium text-xs mb-1">
+                          Nombre del Supermercado (opcional)
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="Ej: Carrefour, Coto, Día..."
+                          value={manualSupermarket}
+                          onChange={(e) => setManualSupermarket(e.target.value)}
+                          className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:border-sky-500 focus:outline-none"
+                        />
                     </div>
 
                     {/* Drag and drop panel */}
@@ -3045,16 +3179,16 @@ export default function App() {
                       <label htmlFor="file-selector" className="cursor-pointer block">
                         <Upload className="w-10 h-10 text-slate-400 mx-auto mb-3" />
                         <p className="text-sm font-bold text-slate-800">
-                          {selectedFile ? selectedFile.name : "Drag & Drop brochure file here"}
+                          {selectedFile ? selectedFile.name : "Arrastrá el folleto acá"}
                         </p>
                         <p className="text-xs text-slate-400 mt-1">
-                          {selectedFile ? `${(selectedFile.size / (1024 * 1024)).toFixed(2)} MB` : "Accepts PDF, JPG, PNG flyers"}
+                          {selectedFile ? `${(selectedFile.size / (1024 * 1024)).toFixed(2)} MB` : "Acepta PDF, JPG, PNG"}
                         </p>
                         <button
                           type="button"
                           className="mt-4 bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold px-4 py-2 rounded-xl transition"
                         >
-                          Select File From Computer
+                          Seleccionar archivo
                         </button>
                       </label>
                     </div>
@@ -3063,7 +3197,7 @@ export default function App() {
                     <div className="flex items-center justify-between gap-3 mt-2">
                       <span className="text-xs text-slate-400 flex items-center gap-1">
                         <Info className="w-3.5 h-3.5" />
-                        Upload a single catalog page or leaflet PDF
+                        Subí una página de folleto o PDF
                       </span>
                       <button
                         onClick={processUpload}
@@ -3073,12 +3207,12 @@ export default function App() {
                         {isProcessing ? (
                           <>
                             <RefreshCw className="w-4 h-4 animate-spin" />
-                            AI Extracting Prices...
+                            Extrayendo precios con IA...
                           </>
                         ) : (
                           <>
                             <Sparkles className="w-4 h-4 text-sky-200" />
-                            Run AI Parser
+                            Analizar con IA
                           </>
                         )}
                       </button>
@@ -3094,10 +3228,10 @@ export default function App() {
                   <div className="flex flex-wrap justify-between items-center gap-2 pb-3 border-b border-slate-100">
                     <div>
                       <span className="text-[10px] text-emerald-600 font-bold bg-emerald-50 px-2.5 py-1 rounded-full uppercase tracking-wider">
-                        AI Extraction Output Preview
+                        Vista previa de extracción con IA
                       </span>
                       <div className="flex items-center gap-2 mt-1">
-                        <h3 className="text-lg font-bold text-slate-800">Review Prices (Mapped: {extractedPreview.items.length} items)</h3>
+                        <h3 className="text-lg font-bold text-slate-800">Revisar precios ({extractedPreview.items.length} artículos)</h3>
                       </div>
                     </div>
                     <div className="flex gap-2">
@@ -3105,14 +3239,14 @@ export default function App() {
                         onClick={discardPreview}
                         className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold px-4 py-2 rounded-xl text-xs transition active:scale-95"
                       >
-                        Discard
+                        Descartar
                       </button>
                       <button
                         onClick={approvePreview}
                         className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-5 py-2 rounded-xl text-xs transition active:scale-95 flex items-center gap-1.5 shadow-sm"
                       >
                         <Check className="w-4 h-4" />
-                        Approve & Save To Browser DB
+                        Aprobar y guardar
                       </button>
                     </div>
                   </div>
@@ -3150,7 +3284,7 @@ export default function App() {
                   <div className="text-xs bg-sky-50 text-sky-800 p-3 rounded-xl flex gap-2">
                     <Info className="w-4 h-4 text-sky-500 shrink-0" />
                     <p>
-                      We mapped the supermarket brand to <strong>{extractedPreview.supermarket}</strong>. You can fine-tune specific items below if the print brochure was blurry or price decimals need tweaking.
+                      Supermercado detectado: <strong>{extractedPreview.supermarket}</strong>. Podés ajustar los artículos abajo si hace falta.
                     </p>
                   </div>
 
@@ -3159,13 +3293,13 @@ export default function App() {
                     <table className="w-full text-left text-xs divide-y divide-slate-200">
                       <thead className="bg-slate-50 text-slate-500 uppercase tracking-wider text-[10px]">
                         <tr>
-                          <th className="p-3">Product Name</th>
-                          <th className="p-3">Department</th>
-                          <th className="p-3">Original Price ($)</th>
-                          <th className="p-3">Sale Price ($)</th>
-                          <th className="p-3">Size Amount</th>
-                          <th className="p-3">Unit</th>
-                          <th className="p-3">Supermarket Key</th>
+                          <th className="p-3">Producto</th>
+                          <th className="p-3">Categoría</th>
+                          <th className="p-3">Precio Original ($)</th>
+                          <th className="p-3">Precio Oferta ($)</th>
+                          <th className="p-3">Cantidad</th>
+                          <th className="p-3">Unidad</th>
+                          <th className="p-3">Supermercado</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200">
@@ -3235,14 +3369,11 @@ export default function App() {
                                 type="text"
                                 value={extractedPreview.supermarket}
                                 onChange={(e) => {
+                                  const supermarket = e.target.value;
+                                  const synced = extractedPreview.items.map(it => ({...it, supermarket}));
                                   setExtractedPreview({
                                     ...extractedPreview,
-                                    supermarket: e.target.value
-                                  });
-                                  // Sync all item brand entries
-                                  const synced = extractedPreview.items.map(it => ({...it, supermarket: e.target.value}));
-                                  setExtractedPreview({
-                                    supermarket: e.target.value,
+                                    supermarket,
                                     items: synced
                                   });
                                 }}
@@ -3259,7 +3390,7 @@ export default function App() {
 
               {/* Upload Log list */}
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100">
-                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Upload Parsing History Log</h4>
+                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Historial de folletos procesados</h4>
                 <div className="divide-y divide-slate-100 max-h-[40vh] overflow-y-auto">
                   
                   {uploads.map((upload) => (
@@ -3281,11 +3412,11 @@ export default function App() {
                         <div>
                           {upload.status === "processing" ? (
                             <span className="px-2 py-0.5 rounded-full bg-sky-50 text-sky-600 font-semibold text-[10px] flex items-center gap-1">
-                              <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Processing...
+                              <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Procesando...
                             </span>
                           ) : upload.status === "completed" ? (
                             <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600 font-semibold text-[10px] flex items-center gap-1">
-                              <Check className="w-2.5 h-2.5" /> Mapped {upload.itemCount} items
+                              <Check className="w-2.5 h-2.5" /> {upload.itemCount} artículos
                             </span>
                           ) : (
                             <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-600 font-semibold text-[10px] flex items-center gap-1" title={upload.errorMessage}>
@@ -3296,21 +3427,31 @@ export default function App() {
 
                         <button
                           onClick={() => {
-                            if (confirm("Remove upload history reference? (This will also clear extracted products in this session if not approved)")) {
-                              db.deleteUpload(upload.id);
-                              setUploads(db.getUploads());
-                              
-                              // Optionally filter items
-                              const remaining = products.filter(p => p.supermarket !== upload.supermarket);
-                              db.clearAllProducts();
-                              db.saveProducts(remaining);
-                              setProducts(remaining);
-
-                              triggerSuccess("Brochure reference removed.");
-                            }
+                            const uploadId = upload.id;
+                            requestConfirm(
+                              "¿Eliminar folleto?",
+                              "Los productos extraídos de este folleto también se eliminarán.",
+                              () => {
+                                const remaining = products.filter(p => p.uploadId !== uploadId);
+                                const prevProducts = db.getProducts();
+                                try {
+                                  db.clearAllProducts();
+                                  db.saveProducts(remaining);
+                                } catch (err) {
+                                  db.saveProducts(prevProducts);
+                                  throw err;
+                                }
+                                setProducts(remaining);
+                                db.deleteUpload(uploadId);
+                                setUploads(db.getUploads());
+                                triggerSuccess("Folleto y sus productos eliminados.");
+                              },
+                              "danger",
+                              "Eliminar"
+                            );
                           }}
                           className="text-slate-300 hover:text-rose-500 p-1 rounded"
-                          title="Delete brochure entry"
+                          title="Eliminar entrada de folleto"
                         >
                           <Trash className="w-3.5 h-3.5" />
                         </button>
@@ -3321,13 +3462,18 @@ export default function App() {
                   ))}
 
                   {uploads.length === 0 && (
-                    <p className="text-slate-400 py-4 text-center">No catalog brochures uploaded yet.</p>
+                    <p className="text-slate-400 py-4 text-center">No hay folletos cargados todavía.</p>
                   )}
 
                 </div>
               </div>
 
             </motion.div>
+          )}
+
+          {/* TAB: INFLACION */}
+          {activeTab === "inflation" && (
+            <InflationTab products={products} receiptsCount={receipts.length} />
           )}
 
           {/* TAB 3: SHOPPING LIST & BUDGET OPTIMIZER */}
@@ -3793,9 +3939,33 @@ export default function App() {
                             {/* Bullet items under this ticket */}
                             <div className="flex flex-col gap-1 border-t border-slate-100/60 pt-2 mb-3">
                               {receipt.items.slice(0, 4).map((it) => (
-                                <div key={it.id} className="flex justify-between text-[10px] text-slate-550">
-                                  <span className="truncate pr-4">• {it.name}</span>
-                                  <span className="shrink-0 font-mono text-slate-700">${it.price.toFixed(0)}</span>
+                                <div key={it.id} className="flex justify-between items-center text-[10px] text-slate-550">
+                                  <span className="truncate pr-2">• {it.name}</span>
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    <span className="font-mono text-slate-700">${it.price.toFixed(0)}</span>
+                                    <button
+                                      onClick={() => {
+                                        const norm = getUnitNormalization(it.amount || 1, it.unit || "u");
+                                        addToShoppingList({
+                                          id: `receipt-${Date.now()}-${it.id}`,
+                                          name: it.name,
+                                          category: it.category || "Other",
+                                          originalPrice: it.price,
+                                          salePrice: it.price,
+                                          amount: it.amount || 1,
+                                          unit: it.unit || "u",
+                                          supermarket: receipt.store,
+                                          dateExtracted: new Date().toISOString(),
+                                          unitPrice: it.price * norm.multiplier,
+                                          baseUnit: norm.baseUnit,
+                                          sourceType: "receipt",
+                                        });
+                                        triggerSuccess(`${it.name} agregado a la lista`);
+                                      }}
+                                      className="text-sky-500 hover:text-sky-700 font-bold px-1 leading-none"
+                                      title="Agregar a la lista de compras"
+                                    >+</button>
+                                  </div>
                                 </div>
                               ))}
                               {receipt.items.length > 4 && (
@@ -3853,7 +4023,7 @@ export default function App() {
                     Configurar API Key y Modelo de Gemini
                   </h3>
                   <p className="text-xs text-slate-500 font-sans">
-                    Brinde su clave de API de Google Gemini para procesar folletos y etiquetas de precio en tiempo real directamente en el dispositivo. La clave se almacena cifrada localmente en su navegador y jamás se transmite a servidores intermedios de terceros.
+                    Brinde su clave de API de Google Gemini para procesar folletos y etiquetas de precio en tiempo real directamente en el dispositivo. La clave se almacena localmente en su navegador y jamás se transmite a servidores intermedios de terceros.
                   </p>
                 </div>
 
@@ -3936,6 +4106,150 @@ export default function App() {
                   <p className="text-[10px] text-rose-500 flex items-center gap-1 pt-1 border-t border-slate-50">
                     <AlertCircle className="w-3.5 h-3.5 shrink-0" /> No hay clave configurada. La funcionalidad de IA Inteligente está desactivada.
                   </p>
+                )}
+              </div>
+
+              {/* Presupuesto mensual */}
+              <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col gap-3">
+                <div className="flex items-center gap-2">
+                  <Calculator className="w-5 h-5 text-emerald-500" />
+                  <h3 className="text-base font-bold text-slate-800">Presupuesto Mensual</h3>
+                </div>
+                <p className="text-xs text-slate-500">Establecé un tope de gasto mensual. El progreso se calcula automáticamente desde los tickets escaneados.</p>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-bold text-slate-600">$</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1000"
+                    value={monthlyBudget || ""}
+                    onChange={(e) => {
+                      const val = Number(e.target.value) || 0;
+                      setMonthlyBudget(val);
+                      localStorage.setItem("bp_monthly_budget", String(val));
+                    }}
+                    className="flex-1 px-3 py-2 text-xs border border-slate-200 rounded-xl focus:border-emerald-500 focus:outline-none"
+                    placeholder="Ej: 150000"
+                  />
+                  <span className="text-xs text-slate-400">ARS / mes</span>
+                </div>
+                {monthlyBudget > 0 && (() => {
+                  const now = new Date();
+                  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+                  const spentThisMonth = receipts
+                    .filter(r => r.date >= monthStart)
+                    .reduce((sum, r) => sum + r.totalAmount, 0);
+                  const pct = Math.min(100, (spentThisMonth / monthlyBudget) * 100);
+                  return (
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-xs">
+                        <span className="text-slate-500">Gastado este mes</span>
+                        <span className="font-bold font-mono text-slate-700">${spentThisMonth.toFixed(0)} / ${monthlyBudget.toFixed(0)}</span>
+                      </div>
+                      <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full transition-all ${
+                          pct > 90 ? 'bg-rose-500' : pct > 70 ? 'bg-amber-500' : 'bg-emerald-500'
+                        }`} style={{width: `${pct}%`}} />
+                      </div>
+                      {pct > 90 && <p className="text-[10px] text-rose-600 font-semibold">¡Cuidado! Estás cerca de alcanzar tu presupuesto mensual.</p>}
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Alertas de precio */}
+              <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col gap-3">
+                <div className="flex items-center gap-2">
+                  <Bell className="w-5 h-5 text-amber-500" />
+                  <h3 className="text-base font-bold text-slate-800">Alertas de Precio</h3>
+                </div>
+                <p className="text-xs text-slate-500">Recibí una notificación cuando un producto baje de tu precio objetivo.</p>
+
+                {/* Add new alert */}
+                <div className="flex gap-2 items-end">
+                  <div className="flex-1 space-y-1">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">Producto</label>
+                    <input
+                      type="text"
+                      value={newAlertName}
+                      onChange={e => setNewAlertName(e.target.value)}
+                      placeholder="Ej: Leche La Serenísima"
+                      className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl focus:border-amber-500 focus:outline-none"
+                    />
+                  </div>
+                  <div className="w-28 space-y-1">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">Precio máx.</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="10"
+                      value={newAlertTarget}
+                      onChange={e => setNewAlertTarget(e.target.value)}
+                      placeholder="$"
+                      className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl focus:border-amber-500 focus:outline-none"
+                    />
+                  </div>
+                  <button
+                    onClick={() => {
+                      const name = newAlertName.trim();
+                      const target = Number(newAlertTarget);
+                      if (!name || !target) { triggerError("Completá nombre y precio objetivo."); return; }
+                      const bestPrice = products
+                        .filter(p => p.name.toLowerCase().includes(name.toLowerCase()))
+                        .reduce((min, p) => Math.min(min, p.salePrice), Infinity);
+                      db.saveAlert({
+                        id: `alert-${Date.now()}`,
+                        productName: name,
+                        productId: "",
+                        targetPrice: target,
+                        currentBestPrice: bestPrice === Infinity ? 0 : bestPrice,
+                        active: true,
+                        createdAt: new Date().toISOString(),
+                      });
+                      setNewAlertName(""); setNewAlertTarget("");
+                      refreshAlerts();
+                      triggerSuccess("Alerta creada. Te avisaremos cuando baje de precio.");
+                    }}
+                    className="px-3 py-2 text-xs font-bold text-white bg-amber-500 hover:bg-amber-600 rounded-xl transition cursor-pointer shrink-0"
+                  >
+                    Crear
+                  </button>
+                </div>
+
+                {/* List of alerts */}
+                {alerts.length === 0 ? (
+                  <p className="text-xs text-slate-400 italic">No hay alertas activas.</p>
+                ) : (
+                  <div className="space-y-2 max-h-60 overflow-y-auto">
+                    {alerts.map(alert => {
+                      const currentBest = products
+                        .filter(p => p.name.toLowerCase().includes(alert.productName.toLowerCase()))
+                        .reduce((min, p) => Math.min(min, p.salePrice), Infinity);
+                      const isTriggered = currentBest !== Infinity && currentBest <= alert.targetPrice;
+                      return (
+                        <div key={alert.id} className={`flex items-center justify-between p-2 rounded-xl border text-xs ${
+                          isTriggered ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'
+                        }`}>
+                          <div className="min-w-0 flex-1">
+                            <p className="font-semibold text-slate-700 truncate">{alert.productName}</p>
+                            <p className="text-slate-400">
+                              Objetivo: <span className="font-mono font-bold">${alert.targetPrice.toFixed(0)}</span>
+                              {currentBest !== Infinity && (
+                                <> · Mejor hoy: <span className={`font-mono font-bold ${isTriggered ? 'text-emerald-600' : 'text-rose-500'}`}>${currentBest.toFixed(0)}</span></>
+                              )}
+                              {isTriggered && <span className="ml-2 text-emerald-600 font-bold">✓ Alerta activa</span>}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => { db.deleteAlert(alert.id); refreshAlerts(); }}
+                            className="text-rose-400 hover:text-rose-600 hover:bg-rose-50 p-1 rounded-lg transition cursor-pointer"
+                          >
+                            <Trash className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
               </div>
 
@@ -4412,6 +4726,56 @@ function doPost(e) {
                     </button>
                   </div>
 
+                  {/* Import CSV */}
+                  <div className="border border-slate-200 p-4 rounded-xl flex flex-col justify-between items-start bg-slate-50/30">
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <Upload className="w-4 h-4 text-sky-600" />
+                        Importar desde CSV
+                      </h4>
+                      <p className="text-[10px] text-slate-400 mt-1 leading-normal">
+                        Cargá un archivo CSV exportado previamente para restaurar productos en el catálogo.
+                      </p>
+                    </div>
+                    <label className="bg-sky-600 hover:bg-sky-700 text-white font-semibold px-3 py-2 rounded-lg text-xs transition flex items-center gap-1.5 active:scale-95 shadow cursor-pointer text-center w-full">
+                      <Upload className="w-3.5 h-3.5" />
+                      Seleccionar archivo CSV
+                      <input
+                        type="file"
+                        accept=".csv"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          const reader = new FileReader();
+                          reader.onload = (ev) => {
+                            try {
+                              const csv = ev.target?.result as string;
+                              const parsed = parseCSV(csv);
+                              if (parsed.length === 0) {
+                                triggerError("No se encontraron productos válidos en el CSV.");
+                                return;
+                              }
+                              parsed.forEach(p => {
+                                db.saveProduct({
+                                  ...p,
+                                  id: `import-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                                  dateExtracted: new Date().toISOString(),
+                                });
+                              });
+                              setProducts(db.getProducts());
+                              triggerSuccess(`${parsed.length} productos importados del CSV.`);
+                            } catch (err: any) {
+                              triggerError(`Error al leer el CSV: ${err.message}`);
+                            }
+                          };
+                          reader.readAsText(file);
+                          e.target.value = "";
+                        }}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+
                 </div>
 
                 <div className="pt-4 border-t border-slate-100 mt-2 flex justify-between items-center text-xs text-slate-500 flex-wrap gap-2">
@@ -4443,6 +4807,18 @@ function doPost(e) {
 
       </main>
 
+      <ConfirmDialog
+        open={confirmDialog !== null}
+        title={confirmDialog?.title || ""}
+        message={confirmDialog?.message || ""}
+        variant={confirmDialog?.variant || "default"}
+        confirmLabel={confirmDialog?.confirmLabel}
+        onConfirm={() => {
+          confirmDialog?.onConfirm();
+          setConfirmDialog(null);
+        }}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }

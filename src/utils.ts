@@ -3,7 +3,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Product } from "./types";
+import type { Product } from "./types";
+
+const DEFAULT_PROXIES = ["https://corsproxy.io/?url={url}", "https://api.allorigins.win/raw?url={url}"];
+
+export function getPublicProxies(): string[] {
+  try {
+    const stored = localStorage.getItem("bp_public_proxy_urls");
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {}
+  return DEFAULT_PROXIES;
+}
+
+export function setPublicProxies(urls: string[]) {
+  localStorage.setItem("bp_public_proxy_urls", JSON.stringify(urls));
+}
 
 /**
  * Normalizes item units (g, kg, ml, L, etc.) to base comparison units (kg, L, unit)
@@ -87,6 +104,41 @@ export function formatUnitPrice(unitPrice: number, baseUnit: string): string {
 /**
  * Generates a standard CSV for Google Sheets
  */
+export function parseCSV(csv: string): Omit<Product, "id" | "dateExtracted">[] {
+  const lines = csv.trim().split("\n");
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(",").map(h => h.trim().toLowerCase());
+  const results: Omit<Product, "id" | "dateExtracted">[] = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const values = lines[i].split(",").map(v => v.trim().replace(/^"|"$/g, ""));
+    const row: Record<string, string> = {};
+    headers.forEach((h, idx) => { row[h] = values[idx] || ""; });
+
+    const name = row["nombre"] || row["name"];
+    if (!name) continue;
+
+    const salePrice = parseFloat(row["precio oferta"] || row["sale price"] || row["precio"] || row["price"]) || 0;
+    const originalPrice = parseFloat(row["precio original"] || row["original price"] || row["originalprice"]) || salePrice;
+    const amount = parseFloat(row["cantidad"] || row["amount"] || "1") || 1;
+    const unit = row["unidad"] || row["unit"] || "u";
+    const norm = getUnitNormalization(amount, unit);
+
+    results.push({
+      name,
+      category: row["categoria"] || row["category"] || "Other",
+      supermarket: row["supermercado"] || row["supermarket"] || "Importado",
+      originalPrice,
+      salePrice,
+      amount,
+      unit,
+      unitPrice: salePrice * norm.multiplier,
+      baseUnit: norm.baseUnit,
+    });
+  }
+  return results;
+}
+
 export function convertToCSV(products: Product[]): string {
   const headers = ["ID", "Nombre", "Categoria", "Supermercado", "Fecha Extraccion", "Precio", "Precio Original", "Precio Oferta", "Cantidad", "Unidad", "Precio Unitario", "Unidad Base", "Origen"];
   const rows = products.map(p => [
@@ -108,59 +160,7 @@ export function convertToCSV(products: Product[]): string {
   return [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
 }
 
-/**
- * Supermercados y precios reales de Argentina para comparaciones instantáneas.
- * Esto permite probar la aplicación de inmediato con alimentos típicos argentinos en ARS.
- */
-export const presetOnlineStores: Array<{
-  id: string;
-  name: string;
-  isOnlineOnly: boolean;
-  websiteUrl: string;
-  catalogItems: Array<{ name: string; category: string; price: number; amount: number; unit: string }>;
-}> = [];
 
-/**
- * Searches for a match or similar products from online catalogs to compare with
- */
-export function findSimilarOnlineProducts(productName: string, category: string) {
-  const matches: Array<{
-    storeName: string;
-    productName: string;
-    price: number;
-    amount: number;
-    unit: string;
-    unitPrice: number;
-    baseUnit: string;
-  }> = [];
-
-  const words = productName.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-
-  presetOnlineStores.forEach(store => {
-    store.catalogItems.forEach(item => {
-      // Check if categories match, or if any keywords align
-      const itemWords = item.name.toLowerCase();
-      const hasWordOverlap = words.some(word => itemWords.includes(word));
-      const categoryMatch = item.category.toLowerCase() === category.toLowerCase();
-
-      if (categoryMatch || hasWordOverlap) {
-        const norm = getUnitNormalization(item.amount, item.unit);
-        const unitPrice = item.price * norm.multiplier;
-        matches.push({
-          storeName: store.name,
-          productName: item.name,
-          price: item.price,
-          amount: item.amount,
-          unit: item.unit,
-          unitPrice,
-          baseUnit: norm.baseUnit
-        });
-      }
-    });
-  });
-
-  return matches.sort((a, b) => a.unitPrice - b.unitPrice);
-}
 
 /**
  * Cleans raw HTML for Gemini consumption:

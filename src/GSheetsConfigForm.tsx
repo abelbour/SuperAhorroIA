@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { RefreshCw, Check, AlertCircle, Share2, FileSpreadsheet } from "lucide-react";
 import DebouncedInput from "./DebouncedInput";
+import { getPublicProxies, setPublicProxies } from "./utils";
 
 interface Props {
   gsheetsUrl: string;
@@ -21,6 +22,7 @@ export default function GSheetsConfigForm({
 
   const [localUrl, setLocalUrl] = useState(propUrl);
   const [localSsid, setLocalSsid] = useState(propSsid);
+  const [proxyUrlsText, setProxyUrlsText] = useState(getPublicProxies().join("\n"));
 
   useEffect(() => { setLocalUrl(propUrl); }, [propUrl]);
   useEffect(() => { setLocalSsid(propSsid); }, [propSsid]);
@@ -119,6 +121,16 @@ export default function GSheetsConfigForm({
               className="w-4 h-4 accent-amber-500" />
             <span className="text-xs text-slate-700 font-medium">Usar proxies públicos de respaldo (corsproxy.io, allorigins)</span>
           </label>
+          <textarea
+            className="w-full border border-slate-300 rounded px-2 py-1 text-xs font-mono mt-1"
+            rows={2}
+            placeholder="Una URL por línea, con {url} como placeholder"
+            value={proxyUrlsText}
+            onChange={(e) => {
+              setProxyUrlsText(e.target.value);
+              setPublicProxies(e.target.value.split("\n").map(s => s.trim()).filter(Boolean));
+            }}
+          />
         </div>
       </div>
     </div>

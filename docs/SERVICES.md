@@ -16,6 +16,28 @@ const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName
 - **Default**: `gemini-2.5-flash-lite` (fast, cost-effective)
 - **Temperature**: Low (0.1-0.3) for deterministic structured output
 
+## Unified Call Helper: `callGemini()`
+
+All Gemini API functions delegate to a shared `callGemini()` helper that:
+
+```typescript
+async function callGemini(
+  apiKey: string,
+  systemInstruction: string,
+  contents: Content[],
+  responseSchema: object,
+  modelName?: string,
+  maxResults?: number  // controls candidateCount (default 1)
+): Promise<string>
+```
+
+- Validates API key presence
+- Formats the request with `systemInstruction`, `contents`, and `responseSchema` (structured output)
+- Sends POST to Gemini REST API
+- Checks HTTP status and returns extracted text
+- Throws descriptive errors in **Spanish** for UI display
+- All error messages are in Argentine Spanish (e.g., "Error al analizar el folleto")
+
 ## Core Functions
 
 ### 1. `parseBrochureWithGemini(base64, mimeType, apiKey)`
@@ -94,11 +116,11 @@ AI-powered store analysis wizard — determines the best method to get prices.
 
 ## Error Handling
 
-All functions:
-- Validate API key presence
-- Check HTTP response status
-- Parse JSON response with try/catch
-- Throw descriptive errors for UI display
+All functions use `callGemini()` which:
+- Validates API key presence
+- Checks HTTP response status
+- Parses JSON response with try/catch
+- Throws descriptive errors in **Spanish** for UI display
 
 ## Model Management
 

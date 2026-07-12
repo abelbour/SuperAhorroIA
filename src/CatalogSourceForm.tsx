@@ -346,7 +346,7 @@ export default function CatalogSourceForm({ initialData, interpretingId, onSave,
           {initialData?.id ? "Actualizar" : "Guardar"}
         </button>
         {initialData?.id && (
-          <button onClick={() => onDelete(initialData.id!, initialData.name)}
+          <button onClick={() => { if (!initialData.id) return; onDelete(initialData.id, initialData.name); }}
             className="text-rose-500 hover:text-rose-600 font-bold bg-rose-50 hover:bg-rose-100 p-2 rounded-lg border border-rose-100 transition text-xs flex items-center gap-1">
             <Trash className="w-4 h-4" />
             Eliminar

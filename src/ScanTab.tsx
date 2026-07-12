@@ -1,15 +1,16 @@
-import React from "react";
-import { Camera, AlertCircle, RefreshCw, ScanLine, Upload, Calculator, TrendingUp, Check, Info, Globe, Database, Search, Plus, ShoppingCart } from "lucide-react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { Camera, AlertCircle, RefreshCw, ScanLine, Upload, Calculator, TrendingUp, Check, Info, Globe, Database, Search, Plus, ShoppingCart, Barcode } from "lucide-react";
 import { motion } from "motion/react";
 import { Product, CatalogSource, ApiProductResult } from "./types";
-import { formatUnitPrice, getUnitNormalization, findSimilarOnlineProducts } from "./utils";
+import { SinglePriceScanResult } from "./gemini";
+import { formatUnitPrice, getUnitNormalization } from "./utils";
 import DebouncedInput from "./DebouncedInput";
 
 interface ScanTabProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   apiKey: string;
   isCameraActive: boolean;
-  scannedItem: any;
+  scannedItem: SinglePriceScanResult | null;
   setScannedItem: (v: any) => void;
   scanCapturedImage: string | null;
   setScanCapturedImage: (v: string | null) => void;
@@ -56,6 +57,63 @@ const ScanTab = React.memo(function ScanTab({
   triggerSuccess,
   setActiveTab,
 }: ScanTabProps) {
+  const [isBarcodeMode, setIsBarcodeMode] = useState(false);
+  const [detectedBarcode, setDetectedBarcode] = useState<string | null>(null);
+  const [barcodeError, setBarcodeError] = useState<string | null>(null);
+  const barcodeScanRef = useRef<ReturnType<typeof setInterval>>();
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const canvasCtxRef = useRef<CanvasRenderingContext2D | null>(null);
+
+  const stopBarcodeScanning = useCallback(() => {
+    clearInterval(barcodeScanRef.current);
+    barcodeScanRef.current = undefined;
+    setIsBarcodeMode(false);
+  }, []);
+
+  const startBarcodeScanning = useCallback(async () => {
+    setBarcodeError(null);
+    setDetectedBarcode(null);
+    if (!('BarcodeDetector' in window)) {
+      setBarcodeError("Tu navegador no soporta detección de códigos de barras. Probá con Chrome o Edge en Android.");
+      return;
+    }
+    if (!videoRef.current) {
+      setBarcodeError("La cámara no está activa.");
+      return;
+    }
+    setIsBarcodeMode(true);
+    const barcodeDetector = new (window as any).BarcodeDetector({ formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'qr_code'] });
+    canvasRef.current = document.createElement('canvas');
+    canvasCtxRef.current = canvasRef.current.getContext('2d');
+
+    barcodeScanRef.current = setInterval(async () => {
+      const video = videoRef.current;
+      const ctx = canvasCtxRef.current;
+      if (!video || !ctx || !canvasRef.current) return;
+      if (video.readyState < 2) return;
+      canvasRef.current.width = video.videoWidth;
+      canvasRef.current.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0, canvasRef.current.width, canvasRef.current.height);
+      try {
+        const barcodes = await barcodeDetector.detect(canvasRef.current);
+        if (barcodes.length > 0) {
+          const code = barcodes[0].rawValue;
+          setDetectedBarcode(code);
+          stopBarcodeScanning();
+          triggerSuccess(`Código detectado: ${code}. Buscando producto...`);
+          await executeOnlineSearch(code);
+        }
+      } catch {}
+    }, 500);
+  }, [videoRef, executeOnlineSearch, stopBarcodeScanning, triggerSuccess]);
+
+  useEffect(() => {
+    return () => { clearInterval(barcodeScanRef.current); };
+  }, []);
+
+  useEffect(() => {
+    if (!isCameraActive && isBarcodeMode) stopBarcodeScanning();
+  }, [isCameraActive, isBarcodeMode, stopBarcodeScanning]);
   return (
     <motion.div
       key="scan-tab"
@@ -108,8 +166,13 @@ const ScanTab = React.memo(function ScanTab({
             <>
               <div className="relative bg-black rounded-xl overflow-hidden w-full max-w-md">
                 <video ref={videoRef} className="w-full h-auto rounded-xl" autoPlay playsInline />
+                {isBarcodeMode && (
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div className="w-3/4 h-1 border-2 border-emerald-400 rounded-full shadow-lg shadow-emerald-500/50" />
+                  </div>
+                )}
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <button
                   onClick={capturePhotoAndScan}
                   disabled={isCurrentlyScanning}
@@ -121,6 +184,18 @@ const ScanTab = React.memo(function ScanTab({
                     <ScanLine className="w-4 h-4" />
                   )}
                   {isCurrentlyScanning ? "Analizando..." : "Capturar y Comparar"}
+                </button>
+                <button
+                  onClick={isBarcodeMode ? stopBarcodeScanning : startBarcodeScanning}
+                  className={`font-semibold px-4 py-2.5 rounded-xl transition active:scale-95 text-sm flex items-center gap-2 ${
+                    isBarcodeMode
+                      ? 'bg-rose-500 hover:bg-rose-600 text-white'
+                      : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                  }`}
+                  title={isBarcodeMode ? "Detener escaneo de código de barras" : "Escanear código de barras"}
+                >
+                  <Barcode className="w-4 h-4" />
+                  {isBarcodeMode ? "Detener Barras" : "Código de Barras"}
                 </button>
                 <button
                   onClick={stopCamera}
@@ -148,6 +223,26 @@ const ScanTab = React.memo(function ScanTab({
           <div className="mt-4 p-4 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-3 text-rose-800">
             <AlertCircle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
             <p className="text-xs font-medium">{cameraError}</p>
+          </div>
+        )}
+
+        {/* Barcode status */}
+        {barcodeError && (
+          <div className="mt-4 p-4 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-3 text-amber-800">
+            <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+            <p className="text-xs font-medium">{barcodeError}</p>
+          </div>
+        )}
+        {isBarcodeMode && !detectedBarcode && (
+          <div className="mt-3 p-3 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-3 text-emerald-800 text-xs font-semibold">
+            <RefreshCw className="w-4 h-4 animate-spin" />
+            Escaneando código de barras... Apuntá la cámara al código.
+          </div>
+        )}
+        {detectedBarcode && (
+          <div className="mt-3 p-3 bg-sky-50 border border-sky-200 rounded-xl flex items-center gap-3 text-sky-800 text-xs font-semibold">
+            <Check className="w-4 h-4 text-sky-500" />
+            Código detectado: <span className="font-mono font-bold">{detectedBarcode}</span>. Buscando producto...
           </div>
         )}
 
@@ -279,31 +374,17 @@ const ScanTab = React.memo(function ScanTab({
               const matchedLocal = products.filter(p =>
                 p.name.toLowerCase().includes(queryStr) || queryStr.includes(p.name.toLowerCase())
               );
-              const matchedOnline = findSimilarOnlineProducts(scannedItem.productName, scannedItem.category);
-              const allDeals = [
-                ...matchedLocal.map(p => ({
-                  store: p.supermarket,
-                  price: p.salePrice,
-                  originalPrice: p.originalPrice,
-                  type: "Fol Digit",
-                  dateExtracted: p.dateExtracted,
-                  unitPrice: p.unitPrice,
-                  unit: p.baseUnit || p.unit,
-                  amount: p.amount,
-                  productUnit: p.unit,
-                })),
-                ...matchedOnline.map(o => ({
-                  store: o.storeName,
-                  price: o.price,
-                  originalPrice: o.price,
-                  type: "Cat Onl",
-                  dateExtracted: new Date().toISOString(),
-                  unitPrice: o.unitPrice,
-                  unit: o.baseUnit || o.unit,
-                  amount: o.amount,
-                  productUnit: o.unit,
-                })),
-              ];
+              const allDeals = matchedLocal.map(p => ({
+                store: p.supermarket,
+                price: p.salePrice,
+                originalPrice: p.originalPrice,
+                type: "Fol Digit",
+                dateExtracted: p.dateExtracted,
+                unitPrice: p.unitPrice,
+                unit: p.baseUnit || p.unit,
+                amount: p.amount,
+                productUnit: p.unit,
+              }));
               const currentScannerNorm = getUnitNormalization(scannedItem.amount || 1, scannedItem.unit || "unidad");
               const currentScannerUnitPrice = scannedItem.price * currentScannerNorm.multiplier;
               const bestKnownAlternative = allDeals.reduce<(typeof allDeals)[0] | null>(
@@ -410,11 +491,11 @@ const ScanTab = React.memo(function ScanTab({
                   salePrice: scannedItem.price,
                   amount: scannedItem.amount || 1,
                   unit: scannedItem.unit || "unit",
-                  supermarket: scannedItem.supermarket || "Scanned Store",
+                  supermarket: scannedItem.supermarket || "Tienda Escaneada",
                   dateExtracted: new Date().toISOString(),
                   unitPrice: scannedItem.price * norm.multiplier,
                   baseUnit: norm.baseUnit,
-                  description: "Captured via smart camera",
+                  description: "Capturado con cámara",
                   sourceType: "manual",
                 };
                 return (

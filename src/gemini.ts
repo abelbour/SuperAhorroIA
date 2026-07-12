@@ -7,6 +7,44 @@ import { Product, Receipt, ApiProductResult, StoreAnalysisResult } from "./types
 import { getUnitNormalization } from "./utils";
 import { db } from "./db";
 
+async function callGemini<T>(apiKey: string, requestBody: object, noContentMessage: string): Promise<T> {
+  if (!apiKey) {
+    throw new Error("API Key de Gemini no configurada. Configurá tu clave en Ajustes.");
+  }
+
+  const selectedModel = db.getSelectedModel();
+  const modelName = selectedModel.startsWith("models/") ? selectedModel.slice(7) : selectedModel;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(requestBody),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    let parsedErr;
+    try { parsedErr = JSON.parse(errText); } catch {}
+    const message = parsedErr?.error?.message || response.statusText || "Error de API desconocido";
+    throw new Error(`Error de API Gemini: ${message}`);
+  }
+
+  const responseData = await response.json();
+  const textContent = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (!textContent) {
+    throw new Error(noContentMessage);
+  }
+
+  try {
+    return JSON.parse(textContent.trim()) as T;
+  } catch (err: any) {
+    console.error("Failed to parse Gemini output:", textContent, err);
+    throw new Error("El modelo devolvió una respuesta JSON inválida. Intentá de nuevo.");
+  }
+}
+
 export interface ParseResult {
   supermarket: string;
   items: Array<{
@@ -42,14 +80,15 @@ export function fileToBase64(file: File): Promise<string> {
  */
 export function normalizeExtractedItems(
   rawResult: ParseResult,
-  sourceType: "brochure" | "online" | "manual" = "brochure"
+  sourceType: "brochure" | "online" | "manual" = "brochure",
+  uploadId?: string
 ): Product[] {
   const supermarketName = rawResult.supermarket || "Supermarket";
   const dateStr = new Date().toISOString();
 
   return (rawResult.items || []).map((item, idx) => {
     // Basic formatting
-    const name = item.name || "Unknown Product";
+    const name = item.name || "Producto";
     const category = item.category || "Other";
     const origPrice = Number(item.originalPrice) || 0;
     const salePrice = Number(item.salePrice) || origPrice;
@@ -76,6 +115,7 @@ export function normalizeExtractedItems(
       unitPrice,
       baseUnit: norm.baseUnit,
       sourceType,
+      uploadId,
     };
   });
 }
@@ -89,17 +129,12 @@ export async function parseBrochureWithGemini(
   mimeType: string,
   apiKey: string
 ): Promise<ParseResult> {
-  if (!apiKey) {
-    throw new Error("Missing Gemini API Key. Please configure your key in settings.");
-  }
-
-  // Define structured schema for response
   const responseSchema = {
     type: "OBJECT",
     properties: {
       supermarket: { 
         type: "STRING", 
-        description: "The name of the supermarket (e.g., Walmart, Aldi, Safeway, Tesco, Carrefour) identified in the brochure." 
+        description: "The name of the supermarket (e.g., Carrefour, Día, Coto, Disco, Walmart) identified in the brochure." 
       },
       items: {
         type: "ARRAY",
@@ -125,75 +160,23 @@ export async function parseBrochureWithGemini(
     required: ["supermarket", "items"]
   };
 
-  const selectedModel = db.getSelectedModel();
-  const modelName = selectedModel.startsWith("models/") ? selectedModel.slice(7) : selectedModel;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-
-  const promptText = `
-    You are an expert price intelligence agent.
-    Analyze this supermarket flyer brochure, advertisement flyer, or catalog pages (PDF or image) and extract ALL available products and items with their listing details, current discounts or special pricing, amounts (sizes, weights) and units.
-    Ensure to recognize numerical prices clearly. If something is listed as "2 for $5", calculate the price for one ($2.5) but mention "2 for $5" in the description.
-    Double check decimal prices to ensure precision (e.g. do not parse $1.99 as $199).
-    If no volume or amount is listed, assume amount is 1 and unit is 'units'.
-  `;
-
   const requestBody = {
     contents: [
       {
         parts: [
-          {
-            inlineData: {
-              mimeType: mimeType,
-              data: fileBase64,
-            },
-          },
-          {
-            text: promptText,
-          },
+          { inlineData: { mimeType, data: fileBase64 } },
+          { text: promptText },
         ],
       },
     ],
     generationConfig: {
       responseMimeType: "application/json",
-      responseSchema: responseSchema,
-      temperature: 0.1, // low temp for higher structural stability
+      responseSchema,
+      temperature: 0.1,
     },
   };
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    let parsedErr;
-    try {
-      parsedErr = JSON.parse(errText);
-    } catch {
-      // ignore
-    }
-    const message = parsedErr?.error?.message || response.statusText || "Unknown API Error";
-    throw new Error(`Gemini API Error: ${message}`);
-  }
-
-  const responseData = await response.json();
-  const textContent = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
-
-  if (!textContent) {
-    throw new Error("The Gemini AI model did not return any parseable content. Try a clearer scan.");
-  }
-
-  try {
-    const parsedJson = JSON.parse(textContent.trim()) as ParseResult;
-    return parsedJson;
-  } catch (err: any) {
-    console.error("Failed to parse AI output text:", textContent, err);
-    throw new Error("Received invalid structural JSON response from the model. Please retry.");
-  }
+  return callGemini<ParseResult>(apiKey, requestBody, "El modelo Gemini no devolvió contenido procesable. Probá con un escaneo más claro.");
 }
 
 export interface SinglePriceScanResult {
@@ -212,7 +195,7 @@ export async function scanSinglePriceWithGemini(
   apiKey: string
 ): Promise<SinglePriceScanResult> {
   if (!apiKey) {
-    throw new Error("Missing Gemini API Key. Please configure your key in settings.");
+    throw new Error("API Key de Gemini no configurada. Configurá tu clave en Ajustes.");
   }
 
   const responseSchema = {
@@ -232,72 +215,23 @@ export async function scanSinglePriceWithGemini(
     required: ["productName", "price", "amount", "unit", "category", "supermarket", "description"]
   };
 
-  const selectedModel = db.getSelectedModel();
-  const modelName = selectedModel.startsWith("models/") ? selectedModel.slice(7) : selectedModel;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-
-  const promptText = `
-    You are an expert product price tag recognition system.
-    Analyze this camera snapshot of a price tag or shelf label.
-    Extract the main product name (keep it clean and precise), price value, size or amount, unit, and matching department category. If a store/supermarket logo or name is explicitly on the tag, extract it; otherwise, use 'Current Store'.
-  `;
-
   const requestBody = {
     contents: [
       {
         parts: [
-          {
-            inlineData: {
-              mimeType: mimeType,
-              data: imageLowBase64,
-            },
-          },
-          {
-            text: promptText,
-          },
+          { inlineData: { mimeType, data: imageLowBase64 } },
+          { text: promptText },
         ],
       },
     ],
     generationConfig: {
       responseMimeType: "application/json",
-      responseSchema: responseSchema,
+      responseSchema,
       temperature: 0.1,
     },
   };
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    let parsedErr;
-    try {
-      parsedErr = JSON.parse(errText);
-    } catch {
-      // ignore
-    }
-    const message = parsedErr?.error?.message || response.statusText || "Unknown API Error";
-    throw new Error(`Gemini API Error: ${message}`);
-  }
-
-  const responseData = await response.json();
-  const textContent = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
-
-  if (!textContent) {
-    throw new Error("No text content returned from price tag snapshot.");
-  }
-
-  try {
-    return JSON.parse(textContent.trim()) as SinglePriceScanResult;
-  } catch (err: any) {
-    console.error("Failed to parse single price scan output:", textContent, err);
-    throw new Error("Invalid structure returned for price snapshot. Please retry.");
-  }
+  return callGemini<SinglePriceScanResult>(apiKey, requestBody, "No se pudo extraer texto de la foto de la etiqueta.");
 }
 
 export interface SearchUrlInterpretation {
@@ -334,70 +268,26 @@ export async function interpretSearchUrlWithGemini(
     required: ["urlTemplate", "aiExplanation", "tipsForUser"]
   };
 
-  const selectedModel = db.getSelectedModel();
-  const modelName = selectedModel.startsWith("models/") ? selectedModel.slice(7) : selectedModel;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-
   const promptText = `
-    You are an expert e-commerce and price extraction artificial intelligence specialized in Argentine Supermarkets (such as Carrefour, Coto Digital, Jumbo, Disco, VEA, Supermercados Día, ChangoMas, etc.).
+    You are an expert e-commerce and price extraction artificial intelligence specialized in Argentine Supermarkets.
     The user entered the following supermarket details:
     - Supermarket Name: "${supermarketName}"
     - Provided URL: "${userUrl}"
 
-    Analyze the URL. Deduce or construct the optimal search query URL template that replaces the query word with the token "{producto}". For example, if they gave "https://www.carrefour.com.ar", you know Carrefour's search engine uses "/catalogsearch/result/?q={producto}". If they gave a generic site, construct a reliable standard search template.
+    Analyze the URL. Deduce or construct the optimal search query URL template that replaces the query word with the token "{producto}".
     Write your analysis and suggestions entirely in Spanish, matching the typical Argentine grocery environment.
   `;
 
   const requestBody = {
-    contents: [
-      {
-        parts: [
-          {
-            text: promptText,
-          },
-        ],
-      },
-    ],
+    contents: [{ parts: [{ text: promptText }] }],
     generationConfig: {
       responseMimeType: "application/json",
-      responseSchema: responseSchema,
+      responseSchema,
       temperature: 0.2,
     },
   };
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    let parsedErr;
-    try {
-      parsedErr = JSON.parse(errText);
-    } catch {
-      // ignore
-    }
-    const message = parsedErr?.error?.message || response.statusText || "Error desconocido";
-    throw new Error(`Error de API Gemini: ${message}`);
-  }
-
-  const responseData = await response.json();
-  const textContent = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
-
-  if (!textContent) {
-    throw new Error("No se recibió respuesta del modelo Gemini al interpretar la URL.");
-  }
-
-  try {
-    return JSON.parse(textContent.trim()) as SearchUrlInterpretation;
-  } catch (err: any) {
-    console.error("Failed to parse search interpretation JSON:", textContent, err);
-    throw new Error("Estructura devuelta inválida para la interpretación del buscador.");
-  }
+  return callGemini<SearchUrlInterpretation>(apiKey, requestBody, "No se recibió respuesta del modelo Gemini al interpretar la URL.");
 }
 
 export interface ReceiptParseResult {
@@ -419,7 +309,7 @@ export async function parseReceiptWithGemini(
   apiKey: string
 ): Promise<ReceiptParseResult> {
   if (!apiKey) {
-    throw new Error("Missing Gemini API Key. Please configure your key in settings.");
+    throw new Error("API Key de Gemini no configurada. Configurá tu clave en Ajustes.");
   }
 
   const responseSchema = {
@@ -447,78 +337,23 @@ export async function parseReceiptWithGemini(
     required: ["store", "date", "items", "totalAmount"]
   };
 
-  const selectedModel = db.getSelectedModel();
-  const modelName = selectedModel.startsWith("models/") ? selectedModel.slice(7) : selectedModel;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-
-  const promptText = `
-    You are an expert purchase receipt optical character recognition system.
-    Analyze this photo of a supermarket checkout receipt.
-    Identify and extract:
-    1. The Store/Supermarket name (e.g. Carrefour, Coto, DIA, Jumbo). Keep it descriptive but brief.
-    2. The Date of the purchase (format as YYYY-MM-DD). If year is missing or unclear, default to '2026'.
-    3. The complete list of items, their prices, and item sizes. For item size, detect if there is volume or weight associated (e.g. 'harina 1kg' -> amount 1, unit 'kg').
-    4. The receipt total.
-
-    Make sure to parse prices precisely and clean product descriptions to be compact and human-readable in Spanish.
-  `;
-
   const requestBody = {
     contents: [
       {
         parts: [
-          {
-            inlineData: {
-              mimeType: mimeType,
-              data: imageLowBase64,
-            },
-          },
-          {
-            text: promptText,
-          },
+          { inlineData: { mimeType, data: imageLowBase64 } },
+          { text: promptText },
         ],
       },
     ],
     generationConfig: {
       responseMimeType: "application/json",
-      responseSchema: responseSchema,
+      responseSchema,
       temperature: 0.1,
     },
   };
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    let parsedErr;
-    try {
-      parsedErr = JSON.parse(errText);
-    } catch {
-      // ignore
-    }
-    const message = parsedErr?.error?.message || response.statusText || "Unknown API Error";
-    throw new Error(`Gemini API Error: ${message}`);
-  }
-
-  const responseData = await response.json();
-  const textContent = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
-
-  if (!textContent) {
-    throw new Error("No readable text returned from receipt checkout image.");
-  }
-
-  try {
-    return JSON.parse(textContent.trim()) as ReceiptParseResult;
-  } catch (err: any) {
-    console.error("Failed to parse receipt output:", textContent, err);
-    throw new Error("Invalid structure returned for receipt scanner. Please retry.");
-  }
+  return callGemini<ReceiptParseResult>(apiKey, requestBody, "No se pudo extraer texto de la foto del ticket.");
 }
 
 export interface ShoppingListSuggestion {
@@ -534,7 +369,7 @@ export async function suggestShoppingListWithGemini(
   apiKey: string
 ): Promise<ShoppingListSuggestion[]> {
   if (!apiKey) {
-    throw new Error("Missing Gemini API Key. Please configure your key in settings.");
+    throw new Error("API Key de Gemini no configurada. Configurá tu clave en Ajustes.");
   }
 
   const responseSchema = {
@@ -553,54 +388,16 @@ export async function suggestShoppingListWithGemini(
     }
   };
 
-  const selectedModel = db.getSelectedModel();
-  const modelName = selectedModel.startsWith("models/") ? selectedModel.slice(7) : selectedModel;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-
-  const promptText = `
-    You are an expert Argentine supermarket shopping advisor.
-    Analyze the user's historical supermarket receipts below and generate a list of 5-10 logical suggested items they should put on their next shopping list.
-    Look for recurring products or logical needs (e.g. groceries, cleaning, dairy).
-    Explain why each item is suggested inside the 'reason' field entirely in Spanish in a friendly, practical tone suited to an Argentine shopper.
-
-    Receipt History:
-    ${JSON.stringify(receipts, null, 2)}
-  `;
-
   const requestBody = {
     contents: [{ parts: [{ text: promptText }] }],
     generationConfig: {
       responseMimeType: "application/json",
-      responseSchema: responseSchema,
+      responseSchema,
       temperature: 0.3,
     },
   };
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    console.error("Gemini suggestion error response:", text);
-    throw new Error("No se pudo conectar con Gemini para sugerencias Inteligentes.");
-  }
-
-  const responseData = await response.json();
-  const textContent = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
-
-  if (!textContent) {
-    throw new Error("No se recibió respuesta del recomendador inteligente.");
-  }
-
-  try {
-    return JSON.parse(textContent.trim()) as ShoppingListSuggestion[];
-  } catch (err) {
-    console.error("Failed to parse Gemini shopping suggestions:", textContent, err);
-    throw new Error("Estructura devuelta inválida de recomendaciones.");
-  }
+  return callGemini<ShoppingListSuggestion[]>(apiKey, requestBody, "No se recibió respuesta del recomendador inteligente.");
 }
 
 export async function parseApiResults(
@@ -609,7 +406,7 @@ export async function parseApiResults(
   apiKey: string
 ): Promise<ApiProductResult[]> {
   if (!apiKey) {
-    throw new Error("Missing Gemini API Key. Please configure your key in settings.");
+    throw new Error("API Key de Gemini no configurada. Configurá tu clave en Ajustes.");
   }
 
   if (rawResponses.length === 0) {
@@ -639,59 +436,17 @@ export async function parseApiResults(
     }
   };
 
-  const selectedModel = db.getSelectedModel();
-  const modelName = selectedModel.startsWith("models/") ? selectedModel.slice(7) : selectedModel;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-
-  const responsesJson = JSON.stringify(rawResponses.map(r => ({
-    source: r.sourceName,
-    data: r.rawData
-  })), null, 2);
-
-  const promptText = `
-    You are an expert price comparison data extractor.
-    Below are raw API responses from different supermarkets/marketplaces for the product query "${query}".
-    Auto-detect the structure of each response and extract ALL product listings.
-    Normalize prices to a standard format.
-    Identify any discounts, promotions, or special deals.
-    Calculate the unit price (price per base unit like kg, L, or unit) for each product.
-    Return the data as a JSON array of standardized product objects.
-
-    Raw API Responses:
-    ${responsesJson}
-  `;
-
   const requestBody = {
     contents: [{ parts: [{ text: promptText }] }],
     generationConfig: {
       responseMimeType: "application/json",
-      responseSchema: responseSchema,
+      responseSchema,
       temperature: 0.1,
     },
   };
 
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      console.error("Gemini parseApiResults error:", text);
-      return [];
-    }
-
-    const responseData = await response.json();
-    const textContent = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!textContent) {
-      console.warn("parseApiResults: no text content returned");
-      return [];
-    }
-
-    return JSON.parse(textContent.trim()) as ApiProductResult[];
+    return await callGemini<ApiProductResult[]>(apiKey, requestBody, "");
   } catch (err) {
     console.error("parseApiResults failed:", err);
     return [];
@@ -704,7 +459,7 @@ export async function parseScrapedResults(
   apiKey: string
 ): Promise<ApiProductResult[]> {
   if (!apiKey) {
-    throw new Error("Missing Gemini API Key. Please configure your key in settings.");
+    throw new Error("API Key de Gemini no configurada. Configurá tu clave en Ajustes.");
   }
 
   if (htmlInputs.length === 0) return [];
@@ -732,10 +487,6 @@ export async function parseScrapedResults(
     }
   };
 
-  const selectedModel = db.getSelectedModel();
-  const modelName = selectedModel.startsWith("models/") ? selectedModel.slice(7) : selectedModel;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-
   const inputsJson = JSON.stringify(htmlInputs.map(h => ({
     source: h.sourceName,
     html: h.cleanedHtml,
@@ -755,35 +506,17 @@ export async function parseScrapedResults(
     ${inputsJson}
   `;
 
+  const requestBody = {
+    contents: [{ parts: [{ text: promptText }] }],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema,
+      temperature: 0.1,
+    },
+  };
+
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: promptText }] }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          responseSchema: responseSchema,
-          temperature: 0.1,
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      console.error("Gemini parseScrapedResults error:", text);
-      return [];
-    }
-
-    const responseData = await response.json();
-    const textContent = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!textContent) {
-      console.warn("parseScrapedResults: no text content returned");
-      return [];
-    }
-
-    return JSON.parse(textContent.trim()) as ApiProductResult[];
+    return await callGemini<ApiProductResult[]>(apiKey, requestBody, "");
   } catch (err) {
     console.error("parseScrapedResults failed:", err);
     return [];
@@ -796,7 +529,7 @@ export async function analyzeStoreForApi(
   apiKey: string
 ): Promise<StoreAnalysisResult> {
   if (!apiKey) {
-    throw new Error("Missing Gemini API Key. Please configure your key in settings.");
+    throw new Error("API Key de Gemini no configurada. Configurá tu clave en Ajustes.");
   }
 
   const responseSchema = {
@@ -851,81 +584,15 @@ export async function analyzeStoreForApi(
     required: ["storeName", "websiteUrl", "methodType", "confidence", "analysis", "tips"]
   };
 
-  const selectedModel = db.getSelectedModel();
-  const modelName = selectedModel.startsWith("models/") ? selectedModel.slice(7) : selectedModel;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-
-  const promptText = `
-    You are an expert at analyzing supermarket and e-commerce websites to determine how to programmatically get product prices and availability data.
-
-    The user wants to set up automated price comparison for:
-    - Store Name: "${storeName}"
-    - Website URL: "${storeUrl}"
-
-    Analyze this store using your knowledge of e-commerce platforms, public APIs, and web technologies.
-
-    Consider:
-    1. Does this store have a known public REST API? (e.g. Mercado Libre API, Walmart API, etc.)
-    2. Does it use a common e-commerce platform with predictable URL patterns? (e.g. VTEX uses /catalogsearch/result/?q=, VTEX also has /api/catalog_system/pub/products/search/)
-    3. Can product prices be obtained via a well-structured search URL?
-    4. What is the best approach for a client-side application to get prices from this store?
-
-    For stores built on VTEX (like Carrefour Argentina, Jumbo, Disco):
-    - They have a public VTEX search API at /api/catalog_system/pub/products/search?q={producto}
-    - This returns JSON with prices, names, images
-    - methodType should be "api" and responseJsonPath should be left empty (the response itself is the array)
-
-    For stores with custom APIs (like Mercado Libre):
-    - Use their documented API endpoints
-    - Set appropriate query parameters and headers
-
-    For stores that only have HTML search pages:
-    - methodType should be "scrape"
-    - Generate the search URL template for their search box
-    - Provide CSS selectors if you know the HTML structure
-
-    If neither API nor scraping is feasible:
-    - methodType should be "unsupported"
-    - Explain why in the analysis field
-
-    Return the configuration in Spanish for the analysis and tips fields.
-  `;
-
   const requestBody = {
     contents: [{ parts: [{ text: promptText }] }],
     generationConfig: {
       responseMimeType: "application/json",
-      responseSchema: responseSchema,
+      responseSchema,
       temperature: 0.1,
     },
   };
 
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      console.error("analyzeStoreForApi error:", text);
-      let message = response.statusText;
-      try { const errJson = JSON.parse(text); message = errJson?.error?.message || message; } catch {}
-      throw new Error(`Error de Gemini: ${message}`);
-    }
-
-    const responseData = await response.json();
-    const textContent = responseData.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!textContent) {
-      throw new Error("No se recibió respuesta del análisis de la tienda.");
-    }
-
-    return JSON.parse(textContent.trim()) as StoreAnalysisResult;
-  } catch (err: any) {
-    console.error("analyzeStoreForApi failed:", err);
-    throw err;
-  }
+  return callGemini<StoreAnalysisResult>(apiKey, requestBody, "No se recibió respuesta del análisis de la tienda.");
 }
 
