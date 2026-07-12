@@ -73,7 +73,6 @@ import {
   ReceiptParseResult,
   suggestShoppingListWithGemini,
   ShoppingListSuggestion,
-  SinglePriceScanResult,
   parseApiResults,
   parseScrapedResults,
   analyzeStoreForApi
