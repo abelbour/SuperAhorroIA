@@ -2774,6 +2774,17 @@ export default function App() {
         </div>
       </aside>
 
+      {/* Floating expand button when sidebar collapsed */}
+      {sidebarCollapsed && (
+        <button
+          onClick={() => setSidebarCollapsed(false)}
+          className="fixed left-0 top-1/2 -translate-y-1/2 z-50 bg-slate-900 border-r border-t border-b border-slate-800 rounded-r-lg p-2.5 text-slate-400 hover:text-white hover:bg-slate-800 transition shadow-lg"
+          title="Expandir menú"
+        >
+          <ChevronRight className="w-5 h-5" />
+        </button>
+      )}
+
       {/* Main Core View Area */}
       <main className={`flex-1 min-h-screen flex flex-col p-4 md:p-6 pb-12 overflow-y-auto transition-all duration-300 ${sidebarCollapsed ? "md:ml-20" : "md:ml-72"}`}>
         
