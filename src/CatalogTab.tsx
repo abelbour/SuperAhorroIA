@@ -83,6 +83,8 @@ const CatalogTab = React.memo(function CatalogTab({
   setActiveTab,
   onCreateAlert,
 }: CatalogTabProps) {
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   useEffect(() => { setPage(1); }, [searchQuery, categoryFilter, supermarketFilter, dateFrom, dateTo, sortBy]);
 
   const filteredProducts = useMemo(() => {
@@ -127,8 +129,6 @@ const CatalogTab = React.memo(function CatalogTab({
 
   const ITEMS_PER_PAGE = 30;
   const [page, setPage] = useState(1);
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
   const totalPages = Math.max(1, Math.ceil(filteredProducts.length / ITEMS_PER_PAGE));
   const safePage = Math.min(page, totalPages);
   const paginatedProducts = filteredProducts.slice((safePage - 1) * ITEMS_PER_PAGE, safePage * ITEMS_PER_PAGE);
