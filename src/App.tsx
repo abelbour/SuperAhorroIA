@@ -106,6 +106,7 @@ export default function App() {
   const [alerts, setAlerts] = useState<PriceAlert[]>(() => db.getAlerts());
   const [newAlertName, setNewAlertName] = useState("");
   const [newAlertTarget, setNewAlertTarget] = useState("");
+  const { errorMessage, successMessage, triggerError, triggerSuccess, setErrorMessage, setSuccessMessage } = useAlerts();
   const refreshAlerts = useCallback(() => setAlerts(db.getAlerts()), []);
   const createAlert = useCallback((productName: string, currentPrice: number) => {
     db.saveAlert({
@@ -157,7 +158,6 @@ export default function App() {
   
   // Statuses
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
-  const { errorMessage, successMessage, triggerError, triggerSuccess, setErrorMessage, setSuccessMessage } = useAlerts();
 
   // AbortController for deduplicating search requests
   const searchAbortRef = useRef<AbortController | null>(null);
