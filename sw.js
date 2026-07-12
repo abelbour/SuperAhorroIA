@@ -1,44 +1,41 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
-const CACHE_NAME = "smartprice-v1";
-const ASSETS_TO_CACHE = [
+const CACHE_NAME = "smartprice-v3";
+const SHELL_ASSETS = [
   "/",
   "/index.html",
-  "/src/main.tsx",
-  "/src/App.tsx",
-  "/src/index.css",
-  "/src/types.ts",
-  "/src/utils.ts",
-  "/src/db.ts",
-  "/src/gemini.ts",
-  "/manifest.json"
+  "/manifest.json",
 ];
 
-// Install Event
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      console.log("[Service Worker] Caching app shell assets");
-      return cache.addAll(ASSETS_TO_CACHE).catch((err) => {
-        // Some development assets might fail to pre-cache; continue elegantly
-        console.warn("[Service Worker] Pre-cache warning", err);
+    (async () => {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.addAll(SHELL_ASSETS).catch((err) => {
+        console.warn("[SW] Shell cache warning", err);
       });
-    })
+      try {
+        const htmlRes = await fetch("/index.html");
+        const html = await htmlRes.text();
+        const assetUrls = [];
+        const linkRe = /<link[^>]+href="([^"]+\.(?:css|js))"[^>]*>/g;
+        const scriptRe = /<script[^>]+src="([^"]+)"[^>]*>/g;
+        let m;
+        while ((m = linkRe.exec(html)) !== null) assetUrls.push(m[1]);
+        while ((m = scriptRe.exec(html)) !== null) assetUrls.push(m[1]);
+        if (assetUrls.length > 0) {
+          await cache.addAll(assetUrls);
+        }
+      } catch {}
+    })()
   );
   self.skipWaiting();
 });
 
-// Activate Event
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keyList) => {
       return Promise.all(
         keyList.map((key) => {
           if (key !== CACHE_NAME) {
-            console.log("[Service Worker] Removing old cache", key);
             return caches.delete(key);
           }
         })
@@ -48,42 +45,29 @@ self.addEventListener("activate", (event) => {
   self.clients.claim();
 });
 
-// Fetch Interception
 self.addEventListener("fetch", (event) => {
-  // Only handle standard GET requests and local scope
   if (event.request.method !== "GET" || !event.request.url.startsWith(self.location.origin)) {
     return;
   }
-
-  // Skip Gemini API requests
   if (event.request.url.includes("googleapis.com")) {
     return;
   }
 
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      if (cachedResponse) {
-        return cachedResponse;
-      }
-
-      return fetch(event.request)
-        .then((networkResponse) => {
-          if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== "basic") {
-            return networkResponse;
-          }
-
-          // Cache newly visited local assets dynamically
+    fetch(event.request)
+      .then((networkResponse) => {
+        if (networkResponse && networkResponse.status === 200 && networkResponse.type === "basic") {
           const responseToCache = networkResponse.clone();
           caches.open(CACHE_NAME).then((cache) => {
             cache.put(event.request, responseToCache);
           });
-
-          return networkResponse;
-        })
-        .catch(() => {
-          // Offline fallback
-          return caches.match("/");
+        }
+        return networkResponse;
+      })
+      .catch(() => {
+        return caches.match(event.request).then((cached) => {
+          return cached || caches.match("/");
         });
-    })
+      })
   );
 });
