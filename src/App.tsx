@@ -2053,12 +2053,6 @@ export default function App() {
         }
       });
 
-      onlineMatches.forEach(match => {
-        if (!priceBook[match.storeName] || match.price < priceBook[match.storeName]) {
-          priceBook[match.storeName] = match.price;
-        }
-      });
-
       // Calculate totals for each market
       supermarketsRepresented.forEach(m => {
         if (priceBook[m] !== undefined) {
