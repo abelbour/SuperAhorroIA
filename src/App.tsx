@@ -2395,14 +2395,17 @@ export default function App() {
         }
 
         if (!response) {
+          triggerError(`${source.name}: sin respuesta después de todos los intentos.`);
           setTestResult({ id: source.id, status: 0, body: "Sin respuesta", bodyPreview: "No se pudo conectar después de todos los intentos.", method: "api" });
           return;
         }
 
         const bodyText = await response.text();
         const preview = bodyText.length > 500 ? bodyText.slice(0, 500) + "\n... (truncado, " + bodyText.length + " chars total)" : bodyText;
+        triggerSuccess(`${source.name} respondió (HTTP ${response.status}, ${bodyText.length} bytes)`);
         setTestResult({ id: source.id, status: response.status, body: bodyText, bodyPreview: preview, method: "api" });
       } catch (err: any) {
+        triggerError(`${source.name}: ${err.message}`);
         setTestResult({ id: source.id, status: 0, body: err.message, bodyPreview: `Error: ${err.message}`, method: "api" });
       } finally {
         setTestingSourceId(null);
@@ -2413,6 +2416,7 @@ export default function App() {
     if (source.searchMethod === "scrape") {
       const scrapeUrl = (source.searchUrlTemplate || "").replace(/{producto}/g, encodeURIComponent(testQuery));
       if (!scrapeUrl) {
+        triggerError(`${source.name}: no hay URL de búsqueda configurada.`);
         setTestResult({ id: source.id, status: 0, body: "Sin URL", bodyPreview: "No hay URL de búsqueda configurada.", method: "scrape" });
         setTestingSourceId(null);
         return;
@@ -2452,14 +2456,17 @@ export default function App() {
           }
         }
         if (!response) {
+          triggerError(`${source.name}: sin respuesta (scrape).`);
           setTestResult({ id: source.id, status: 0, body: "Sin respuesta", bodyPreview: "No se pudo conectar.", method: "scrape" });
           return;
         }
         const bodyText = await response.text();
         const cleaned = cleanHtmlForGemini(bodyText);
         const preview = cleaned.length > 500 ? cleaned.slice(0, 500) + "\n... (truncado, " + cleaned.length + " chars)" : cleaned;
+        triggerSuccess(`${source.name} respondió (scrape, ${cleaned.length} bytes limpios)`);
         setTestResult({ id: source.id, status: response.status, body: cleaned, bodyPreview: preview, method: "scrape" });
       } catch (err: any) {
+        triggerError(`${source.name}: ${err.message}`);
         setTestResult({ id: source.id, status: 0, body: err.message, bodyPreview: `Error: ${err.message}`, method: "scrape" });
       } finally {
         setTestingSourceId(null);
@@ -2467,6 +2474,7 @@ export default function App() {
       return;
     }
 
+    triggerError(`${source.name}: no tiene API ni scraping configurado.`);
     setTestResult({ id: source.id, status: 0, body: "Sin método", bodyPreview: "Este catálogo no tiene API ni scraping configurado.", method: "none" });
     setTestingSourceId(null);
   };
